@@ -7,6 +7,7 @@ import {
   List,
   Menu,
   Search,
+  Settings,
 } from "lucide-react";
 import type { ChangeEvent } from "react";
 import type { LibraryInfo, SearchQuery } from "../types";
@@ -24,6 +25,7 @@ interface AppHeaderProps {
   onToggleFilters: () => void;
   onToggleSidebar: () => void;
   onLibraryMenu: () => void;
+  onAppMenu: () => void;
 }
 
 export function AppHeader({
@@ -38,6 +40,7 @@ export function AppHeader({
   onToggleFilters,
   onToggleSidebar,
   onLibraryMenu,
+  onAppMenu,
 }: AppHeaderProps) {
   const handleSort = (event: ChangeEvent<HTMLSelectElement>) => onSort(event.target.value as SearchQuery["sortBy"]);
 
@@ -87,6 +90,7 @@ export function AppHeader({
           <ChevronDown size={13} aria-hidden="true" />
         </label>
         <IconButton label="显示筛选器" onClick={onToggleFilters}><Filter size={16} /></IconButton>
+        <IconButton label="应用设置" onClick={onAppMenu}><Settings size={16} /></IconButton>
       </div>
     </header>
   );

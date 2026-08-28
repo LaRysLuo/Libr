@@ -1219,6 +1219,55 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_counts_and_folder_assignment_follow_library_state() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("counts.libr");
+        let source = temp.path().join("asset.txt");
+        fs::write(&source, "shared bytes").unwrap();
+        let mut session = create_library(&path, "counts").unwrap();
+        let first = import_file(&mut session, &source, None).unwrap().asset;
+        update_asset(
+            &mut session,
+            &first.id,
+            &AssetPatch {
+                favorite: Some(true),
+                ..AssetPatch::default()
+            },
+        )
+        .unwrap();
+        let second_id = Uuid::new_v4().to_string();
+        session.conn.execute(
+            "INSERT INTO assets(id, blob_id, display_name, extension, kind, mime, byte_size, notes, source_path, imported_at, created_at)
+             SELECT ?1, blob_id, 'second.txt', extension, kind, mime, byte_size, '', source_path, imported_at, created_at FROM assets WHERE id = ?2",
+            params![second_id, first.id],
+        ).unwrap();
+
+        let before = library_info(&session).unwrap();
+        assert_eq!(before.asset_count, 2);
+        assert_eq!(before.recent_count, 2);
+        assert_eq!(before.unfiled_count, 2);
+        assert_eq!(before.favorite_count, 1);
+        assert_eq!(before.duplicate_count, 2);
+
+        let folder = create_folder(&mut session, "整理", None).unwrap();
+        assert_eq!(
+            assign_assets_to_folder(&mut session, &folder.id, &[first.id.clone()]).unwrap(),
+            1
+        );
+        assert_eq!(
+            assign_assets_to_folder(&mut session, &folder.id, &[first.id.clone()]).unwrap(),
+            0
+        );
+        assert_eq!(list_folders(&session).unwrap()[0].item_count, 1);
+        assert_eq!(library_info(&session).unwrap().unfiled_count, 1);
+
+        set_assets_deleted(&mut session, &[second_id], true).unwrap();
+        let after = library_info(&session).unwrap();
+        assert_eq!(after.asset_count, 1);
+        assert_eq!(after.trash_count, 1);
+    }
+
+    #[test]
     fn filename_sanitization_is_cross_platform_safe() {
         assert_eq!(sanitize_filename("a:b/c?.png"), "a_b_c_.png");
     }

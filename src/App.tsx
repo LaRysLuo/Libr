@@ -31,7 +31,7 @@ async function chooseLibraryToCreate() {
 
 function App() {
   const controller = useLibraryController();
-  const updater = useAppUpdater(controller.activeJobs);
+  const updater = useAppUpdater(controller.activeJobs, controller.library?.path);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [inspectorVisible, setInspectorVisible] = useState(true);
   const [filtersExpanded, setFiltersExpanded] = useState(false);
@@ -39,6 +39,7 @@ function App() {
   const [thumbnailSize, setThumbnailSize] = useState(164);
   const [focusAsset, setFocusAsset] = useState<Asset | null>(null);
   const [libraryMenuOpen, setLibraryMenuOpen] = useState(false);
+  const [appMenuOpen, setAppMenuOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const selectedBytes = useMemo(() => controller.selectedAssets.reduce((sum, item) => sum + item.byteSize, 0), [controller.selectedAssets]);
 
@@ -147,10 +148,9 @@ function App() {
 
   const handleErrorDismiss = () => {
     controller.setError(null);
-    updater.dismiss();
   };
 
-  const visibleError = controller.error ?? (updater.state.status === "error" ? updater.state.message : null);
+  const visibleError = controller.error;
 
   if (!controller.library) {
     return (
@@ -174,7 +174,8 @@ function App() {
         onViewMode={setViewMode}
         onToggleFilters={() => setFiltersExpanded((value) => !value)}
         onToggleSidebar={() => setSidebarVisible((value) => !value)}
-        onLibraryMenu={() => setLibraryMenuOpen((value) => !value)}
+        onLibraryMenu={() => { setAppMenuOpen(false); setLibraryMenuOpen((value) => !value); }}
+        onAppMenu={() => { setLibraryMenuOpen(false); setAppMenuOpen((value) => !value); }}
       />
 
       {libraryMenuOpen ? (
@@ -184,8 +185,12 @@ function App() {
           <button type="button" onClick={() => { setLibraryMenuOpen(false); void saveCopy(); }}><Copy size={15} />另存副本…</button>
           <button type="button" onClick={() => void inspectIntegrity()}><ShieldCheck size={15} />检查资源库完整性</button>
           <button type="button" onClick={() => void compactLibrary()} disabled={controller.activeJobs > 0}><Database size={15} />压缩资源库</button>
-          <span className="menu-divider" />
-          <button type="button" onClick={() => { setLibraryMenuOpen(false); void updater.checkForUpdates(true); }}><RefreshCw size={15} />检查更新…</button>
+        </div>
+      ) : null}
+
+      {appMenuOpen ? (
+        <div className="library-menu app-menu">
+          <button type="button" onClick={() => { setAppMenuOpen(false); void updater.checkForUpdates(true); }}><RefreshCw size={15} />检查更新…</button>
           <button type="button" disabled title="偏好设置将在后续版本开放"><Settings size={15} />偏好设置<kbd>⌘,</kbd></button>
         </div>
       ) : null}
@@ -200,6 +205,16 @@ function App() {
             onScope={controller.setScope}
             onCreateFolder={controller.createFolder}
             onCreateSmartFolder={controller.createSmartFolder}
+            onAssignAssets={async (assetIds, folderId) => {
+              const folder = controller.folders.find((item) => item.id === folderId);
+              const assigned = await controller.assignAssetsToFolder(assetIds, folderId);
+              setToast({
+                kind: "success",
+                message: assigned > 0
+                  ? `已将 ${assigned} 项资源添加到“${folder?.name ?? "文件夹"}”`
+                  : `所选资源已在“${folder?.name ?? "文件夹"}”中`,
+              });
+            }}
           />
         ) : null}
 
@@ -280,7 +295,13 @@ function App() {
         />
       ) : null}
 
-      <UpdateDialog state={updater.state} onDismiss={updater.dismiss} onSkip={updater.skip} onInstall={() => void updater.install()} />
+      <UpdateDialog
+        state={updater.state}
+        onDismiss={updater.dismiss}
+        onSkip={updater.skip}
+        onInstall={() => void updater.install()}
+        onCheck={() => void updater.checkForUpdates(true)}
+      />
 
       {visibleError ? <div className="error-banner"><AlertCircle size={16} />{visibleError}<button onClick={handleErrorDismiss}><X size={14} /></button></div> : null}
       {toast ? (

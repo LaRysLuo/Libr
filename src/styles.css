@@ -345,6 +345,12 @@ kbd {
   backdrop-filter: blur(18px);
 }
 
+.library-menu.app-menu {
+  right: 14px;
+  left: auto;
+  width: 210px;
+}
+
 .library-menu button {
   display: flex;
   height: 34px;
@@ -500,6 +506,24 @@ kbd {
   color: #155be5;
   background: #e5edff;
   font-weight: 540;
+}
+
+.sidebar-row.is-drop-target {
+  color: var(--accent);
+  background: #e8f0ff;
+  box-shadow: inset 0 0 0 1px #8eb2ff;
+}
+
+.sidebar-row.is-drop-target .sidebar-count {
+  color: var(--accent);
+}
+
+.asset-card[draggable="true"] {
+  cursor: grab;
+}
+
+.asset-card[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .disclosure-space {
@@ -1441,22 +1465,30 @@ kbd {
   border-color: var(--accent);
 }
 
-.update-dialog {
+.dialog-backdrop {
   position: fixed;
-  z-index: 220;
-  top: 78px;
-  right: 28px;
+  z-index: 210;
+  inset: 0;
   display: grid;
-  width: 380px;
-  grid-template-columns: 42px 1fr;
-  gap: 11px;
-  padding: 18px;
+  place-items: center;
+  padding: 24px;
+  background: rgba(27, 33, 43, 0.24);
+  backdrop-filter: blur(2px);
+}
+
+.update-dialog {
+  position: relative;
+  display: grid;
+  width: min(440px, calc(100vw - 40px));
+  min-height: 176px;
+  grid-template-columns: 48px 1fr;
+  gap: 14px;
+  padding: 24px;
   color: #252a31;
-  background: rgba(255, 255, 255, 0.98);
+  background: #fff;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 14px;
   box-shadow: var(--shadow-menu);
-  backdrop-filter: blur(20px);
 }
 
 .update-close {
@@ -1468,6 +1500,10 @@ kbd {
   color: #8a9099;
   background: transparent;
   border: 0;
+}
+
+.update-close:disabled {
+  opacity: 0.35;
 }
 
 .update-icon {
@@ -1486,15 +1522,20 @@ kbd {
   background: #e9f7ee;
 }
 
+.update-icon.is-error {
+  color: #c53d3d;
+  background: #fff0f0;
+}
+
 .update-copy h2 {
-  margin: 2px 24px 5px 0;
-  font-size: 14px;
+  margin: 2px 24px 7px 0;
+  font-size: 16px;
 }
 
 .update-copy p {
   margin: 0 0 12px;
   color: #686f79;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.55;
   white-space: pre-line;
 }

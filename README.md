@@ -56,13 +56,13 @@ npm run tauri -- build --debug --no-bundle
 
 - `TAURI_SIGNING_PRIVATE_KEY`：更新私钥完整内容。
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：当前开发密钥为空；正式首发前建议换成带强密码的新密钥，并同步替换公钥。
-- macOS：`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`。
-- Windows：`WINDOWS_CERTIFICATE`（PFX 的 Base64）和 `WINDOWS_CERTIFICATE_PASSWORD`。
+- macOS Developer ID（可选）：`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`。未配置时使用 ad-hoc 签名且不公证，首次打开可能被 Gatekeeper 拦截。
+- Windows Authenticode（可选）：`WINDOWS_CERTIFICATE`（PFX 的 Base64）和 `WINDOWS_CERTIFICATE_PASSWORD`。未配置时仍会发布 Tauri Ed25519 签名的更新包，但 SmartScreen 可能显示未知发布者警告。
 
 将 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 的版本保持一致，然后推送 `vX.Y.Z` 标签。发布流水线会：
 
-1. 构建并正式签名/公证 macOS Universal DMG。
-2. 构建并 Authenticode 签名 Windows x64 NSIS。
+1. 构建 macOS Universal DMG；配置 Apple 凭据时同时签名并公证。
+2. 构建 Windows x64 NSIS；配置 PFX 时同时执行 Authenticode 签名。
 3. 生成并上传 Tauri 更新包、`.sig` 和静态 `latest.json`。
 4. 将 Universal macOS 更新映射为客户端使用的 `darwin-universal` 目标。
 

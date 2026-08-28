@@ -17,6 +17,7 @@ import {
 import { memo, useMemo, useState } from "react";
 import type { Folder, NavigationCounts, SmartFolder } from "../types";
 import type { NavigationScope } from "../hooks/useLibraryController";
+import { ASSET_DRAG_TYPE, readDraggedAssetIds } from "../lib/drag";
 
 interface SidebarProps {
   scope: NavigationScope;
@@ -26,6 +27,7 @@ interface SidebarProps {
   onScope: (scope: NavigationScope) => void;
   onCreateFolder: (name: string) => Promise<void> | void;
   onCreateSmartFolder: (name: string) => Promise<void> | void;
+  onAssignAssets: (assetIds: string[], folderId: string) => Promise<void> | void;
 }
 
 interface NavRowProps {
@@ -36,15 +38,22 @@ interface NavRowProps {
   depth?: number;
   disclosure?: "open" | "closed";
   onClick: () => void;
+  dropActive?: boolean;
+  onDragOver?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragLeave?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDrop?: (event: React.DragEvent<HTMLButtonElement>) => void;
 }
 
-const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, disclosure, onClick }: NavRowProps) {
+const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, disclosure, onClick, dropActive, onDragOver, onDragLeave, onDrop }: NavRowProps) {
   return (
     <button
       type="button"
-      className={`sidebar-row ${selected ? "is-selected" : ""}`}
+      className={`sidebar-row ${selected ? "is-selected" : ""} ${dropActive ? "is-drop-target" : ""}`}
       style={{ paddingInlineStart: `${12 + depth * 16}px` }}
       onClick={onClick}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
     >
       {disclosure === "open" ? <ChevronDown size={13} /> : disclosure === "closed" ? <ChevronRight size={13} /> : <span className="disclosure-space" />}
       <span className="sidebar-icon">{icon}</span>
@@ -59,9 +68,10 @@ function InlineCreate({ placeholder, onCancel, onCreate }: { placeholder: string
   return <form className="sidebar-inline-create" onSubmit={(event) => { event.preventDefault(); if (value.trim()) void Promise.resolve(onCreate(value)).then(onCancel); }}><input autoFocus aria-label={placeholder} placeholder={placeholder} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") onCancel(); }} /><button type="submit" disabled={!value.trim()}>添加</button></form>;
 }
 
-export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreateFolder, onCreateSmartFolder }: SidebarProps) {
+export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [creating, setCreating] = useState<"folder" | "smart" | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const roots = useMemo(() => folders.filter((folder) => !folder.parentId), [folders]);
   const children = useMemo(() => {
     const map = new Map<string, Folder[]>();
@@ -78,6 +88,25 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
     const next = new Set(current);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
+  });
+
+  const dropHandlers = (folderId: string) => ({
+    dropActive: dropTargetId === folderId,
+    onDragOver: (event: React.DragEvent<HTMLButtonElement>) => {
+      if (!Array.from(event.dataTransfer.types).includes(ASSET_DRAG_TYPE)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setDropTargetId(folderId);
+    },
+    onDragLeave: (event: React.DragEvent<HTMLButtonElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTargetId(null);
+    },
+    onDrop: (event: React.DragEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      const assetIds = readDraggedAssetIds(event.dataTransfer);
+      setDropTargetId(null);
+      if (assetIds.length) void onAssignAssets(assetIds, folderId);
+    },
   });
 
   return (
@@ -105,6 +134,7 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
                 selected={scope === `folder:${root.id}`}
                 disclosure={nested.length ? (isCollapsed ? "closed" : "open") : undefined}
                 onClick={() => nested.length ? toggleFolder(root.id) : onScope(`folder:${root.id}`)}
+                {...dropHandlers(root.id)}
               />
               {!isCollapsed ? nested.map((folder) => (
                 <NavRow
@@ -115,6 +145,7 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
                   depth={1}
                   selected={scope === `folder:${folder.id}`}
                   onClick={() => onScope(`folder:${folder.id}`)}
+                  {...dropHandlers(folder.id)}
                 />
               )) : null}
             </div>

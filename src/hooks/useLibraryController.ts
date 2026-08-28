@@ -297,11 +297,16 @@ export function useLibraryController() {
         previewUrl: updated.previewUrl && updated.streamToken ? assetProtocolUrl(updated.streamToken, true) : null,
         assetUrl: updated.streamToken ? assetProtocolUrl(updated.streamToken, false) : null,
       } : asset));
+      await Promise.all([
+        reloadAssets(),
+        refreshLibraryInfo(),
+        patch.folderIds ? loadOrganization() : Promise.resolve(),
+      ]);
     } catch (reason) {
       setError(String(reason));
       await reloadAssets();
     }
-  }, [reloadAssets, tags]);
+  }, [loadOrganization, refreshLibraryInfo, reloadAssets, tags]);
 
   const openLibrary = useCallback(async (path: string) => {
     const info = await libraryApi.open(path);
@@ -323,13 +328,29 @@ export function useLibraryController() {
     setActiveJobs((count) => count + 1);
     try {
       const result = await assetApi.import(paths, folderId);
-      await reloadAssets();
-      if (isTauriRuntime()) setLibrary(await libraryApi.inspect());
+      await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
       return result;
     } finally {
       setActiveJobs((count) => Math.max(0, count - 1));
     }
-  }, [reloadAssets]);
+  }, [loadOrganization, refreshLibraryInfo, reloadAssets]);
+
+  const assignAssetsToFolder = useCallback(async (assetIds: string[], folderId: string) => {
+    const assetIdSet = new Set(assetIds);
+    const newlyAssigned = assets.filter((asset) => assetIdSet.has(asset.id) && !asset.folderIds.includes(folderId)).length;
+    setAssets((current) => current.map((asset) => assetIdSet.has(asset.id) && !asset.folderIds.includes(folderId)
+      ? { ...asset, folderIds: [...asset.folderIds, folderId] }
+      : asset));
+    if (!isTauriRuntime()) {
+      setFolders((current) => current.map((folder) => folder.id === folderId
+        ? { ...folder, itemCount: folder.itemCount + newlyAssigned }
+        : folder));
+      return newlyAssigned;
+    }
+    const assigned = await organizationApi.assignAssets(folderId, assetIds);
+    await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
+    return assigned;
+  }, [assets, loadOrganization, refreshLibraryInfo, reloadAssets]);
 
   const createFolder = useCallback(async (name: string) => {
     const trimmed = name.trim();
@@ -358,27 +379,29 @@ export function useLibraryController() {
     const deletedAt = new Date().toISOString();
     setAssets((current) => current.map((asset) => assetIds.includes(asset.id) ? { ...asset, deletedAt } : asset));
     setSelectedIds(new Set());
-    if (isTauriRuntime()) await assetApi.trash(assetIds);
-  }, []);
+    if (isTauriRuntime()) {
+      await assetApi.trash(assetIds);
+      await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
+    }
+  }, [loadOrganization, refreshLibraryInfo, reloadAssets]);
 
   const restoreAssets = useCallback(async (assetIds: string[]) => {
     setAssets((current) => current.map((asset) => assetIds.includes(asset.id) ? { ...asset, deletedAt: null } : asset));
     setSelectedIds(new Set());
     if (isTauriRuntime()) {
       await assetApi.restore(assetIds);
-      await reloadAssets();
+      await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
     }
-  }, [reloadAssets]);
+  }, [loadOrganization, refreshLibraryInfo, reloadAssets]);
 
   const purgeAssets = useCallback(async (assetIds: string[]) => {
     setAssets((current) => current.filter((asset) => !assetIds.includes(asset.id)));
     setSelectedIds(new Set());
     if (isTauriRuntime()) {
       await assetApi.purge(assetIds);
-      await reloadAssets();
-      setLibrary(await libraryApi.inspect());
+      await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
     }
-  }, [reloadAssets]);
+  }, [loadOrganization, refreshLibraryInfo, reloadAssets]);
 
   const exportAssets = useCallback(async (assetIds: string[], destination: string) => {
     setActiveJobs((count) => count + 1);
@@ -450,6 +473,7 @@ export function useLibraryController() {
     openLibrary,
     createLibrary,
     importPaths,
+    assignAssetsToFolder,
     createFolder,
     createSmartFolder,
     trashAssets,

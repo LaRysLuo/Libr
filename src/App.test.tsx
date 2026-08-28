@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 
@@ -54,11 +54,57 @@ describe("Libr desktop shell", () => {
   it("runs the manual update state flow", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(screen.getByRole("button", { name: "我的素材.libr" }));
+    await user.click(screen.getByRole("button", { name: "应用设置" }));
     await user.click(screen.getByRole("button", { name: /检查更新/ }));
     const dialog = screen.getByRole("dialog", { name: "应用更新" });
-    expect(within(dialog).getByText("发现新版本 1.1.0")).toBeInTheDocument();
-    await user.click(within(dialog).getByRole("button", { name: "跳过此版本" }));
+    expect(within(dialog).getByText("正在检查更新")).toBeInTheDocument();
+    expect(await within(dialog).findByText("Libr 已是最新版本")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "完成" }));
     expect(screen.queryByRole("dialog", { name: "应用更新" })).not.toBeInTheDocument();
+  });
+
+  it("derives sidebar counts from live asset state", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const countFor = (label: string) => within(screen.getByText(label).closest("button")!).getByText(/^\d+$/);
+
+    expect(countFor("全部资源")).toHaveTextContent("19");
+    expect(countFor("收藏")).toHaveTextContent("3");
+    expect(countFor("回收站")).toHaveTextContent("0");
+
+    const inspector = document.querySelector(".inspector")!;
+    await user.click(within(inspector as HTMLElement).getByRole("button", { name: "取消收藏" }));
+    expect(countFor("收藏")).toHaveTextContent("2");
+    await user.click(within(inspector as HTMLElement).getByRole("button", { name: "移到回收站" }));
+    expect(countFor("全部资源")).toHaveTextContent("18");
+    expect(countFor("回收站")).toHaveTextContent("1");
+  });
+
+  it("assigns selected assets by dragging them onto a folder", async () => {
+    render(<App />);
+    const transferData = new Map<string, string>();
+    const transferTypes: string[] = [];
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      types: transferTypes,
+      setData(type: string, value: string) {
+        transferData.set(type, value);
+        if (!transferTypes.includes(type)) transferTypes.push(type);
+      },
+      getData(type: string) {
+        return transferData.get(type) ?? "";
+      },
+    } as unknown as DataTransfer;
+
+    const card = screen.getAllByText("DSC_0876.jpg")[0].closest(".asset-card")!;
+    const folderRow = screen.getAllByText("文档").find((element) => element.classList.contains("sidebar-label"))!.closest("button")!;
+    expect(within(folderRow).getByText("1")).toBeInTheDocument();
+    fireEvent.dragStart(card, { dataTransfer });
+    fireEvent.dragOver(folderRow, { dataTransfer });
+    expect(folderRow).toHaveClass("is-drop-target");
+    fireEvent.drop(folderRow, { dataTransfer });
+    await waitFor(() => expect(within(folderRow).getByText("2")).toBeInTheDocument());
+    expect(await screen.findByText(/已将 1 项资源添加到“文档”/)).toBeInTheDocument();
   });
 });

@@ -55,7 +55,7 @@ export const mockAssets: Asset[] = [
   { id: "asset-beach", displayName: "度假人像.jpg", extension: "JPG", kind: "image", mime: "image/jpeg", byteSize: 4_700_000, width: 4200, height: 5600, rating: 0, favorite: false, notes: "", sourcePath: "/素材库/摄影/人像/度假人像.jpg", importedAt: now, createdAt: now, folderIds: ["folder-portrait"], tags: [tag("tag-portrait", "人像")], previewUrl: beach },
 ];
 
-export const mockFolders: Folder[] = [
+const mockFolderDefinitions: Folder[] = [
   { id: "folder-project", name: "项目", itemCount: 448, sortOrder: 0 },
   { id: "folder-brand", parentId: "folder-project", name: "品牌设计", itemCount: 230, sortOrder: 0 },
   { id: "folder-marketing", parentId: "folder-project", name: "宣传物料", itemCount: 86, sortOrder: 1 },
@@ -69,6 +69,11 @@ export const mockFolders: Folder[] = [
   { id: "folder-doc", name: "文档", itemCount: 64, sortOrder: 4 },
   { id: "folder-source", name: "素材源文件", itemCount: 90, sortOrder: 5 },
 ];
+
+export const mockFolders: Folder[] = mockFolderDefinitions.map((folder) => ({
+  ...folder,
+  itemCount: mockAssets.filter((asset) => asset.folderIds.includes(folder.id) && !asset.deletedAt).length,
+}));
 
 export const mockSmartFolders: SmartFolder[] = [
   { id: "smart-today", name: "今日导入", itemCount: 28, query: { version: 1, operator: "and", rules: [{ field: "importedAt", operator: "after", value: "today" }] } },

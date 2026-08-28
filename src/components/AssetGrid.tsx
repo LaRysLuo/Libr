@@ -1,6 +1,7 @@
 import { Check, Heart, ListChecks, Play, Star } from "lucide-react";
 import { memo, useCallback } from "react";
 import type { Asset } from "../types";
+import { ASSET_DRAG_TYPE } from "../lib/drag";
 import { AssetArtwork } from "./AssetArtwork";
 
 interface AssetGridProps {
@@ -26,12 +27,14 @@ const AssetCard = memo(function AssetCard({
   onSelect,
   onOpen,
   onToggleFavorite,
+  onDragStart,
 }: {
   asset: Asset;
   selected: boolean;
   onSelect: (event: React.MouseEvent) => void;
   onOpen: () => void;
   onToggleFavorite: (event: React.MouseEvent) => void;
+  onDragStart: (event: React.DragEvent) => void;
 }) {
   const duration = formatDuration(asset.durationMs);
   return (
@@ -40,7 +43,9 @@ const AssetCard = memo(function AssetCard({
       tabIndex={0}
       aria-selected={selected}
       data-asset-id={asset.id}
+      draggable
       onClick={onSelect}
+      onDragStart={onDragStart}
       onDoubleClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === "Enter") onOpen();
@@ -64,6 +69,14 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
   const handleSelect = useCallback((assetId: string, event: React.MouseEvent) => {
     onSelect(assetId, event.metaKey || event.ctrlKey, event.shiftKey);
   }, [onSelect]);
+
+  const handleDragStart = useCallback((assetId: string, event: React.DragEvent) => {
+    const draggedIds = selectedIds.has(assetId) ? [...selectedIds] : [assetId];
+    if (!selectedIds.has(assetId)) onSelect(assetId);
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData(ASSET_DRAG_TYPE, JSON.stringify(draggedIds));
+    event.dataTransfer.setData("text/plain", `${draggedIds.length} 个 Libr 资源`);
+  }, [onSelect, selectedIds]);
 
   if (!loading && assets.length === 0) {
     return (
@@ -92,6 +105,7 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
             onSelect={(event) => handleSelect(asset.id, event)}
             onOpen={() => onOpen(asset)}
             onToggleFavorite={(event) => { event.stopPropagation(); onToggleFavorite(asset); }}
+            onDragStart={(event) => handleDragStart(asset.id, event)}
           />
         ))}
       </div>
