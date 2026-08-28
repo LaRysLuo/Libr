@@ -1,5 +1,5 @@
-import { FileArchive, FileCode2, FileText, Play, Type } from "lucide-react";
-import { memo, useMemo } from "react";
+import { FileArchive, FileCode2, FileText, Type } from "lucide-react";
+import { memo, useCallback, useMemo } from "react";
 import type { Asset } from "../types";
 
 interface AssetArtworkProps {
@@ -11,9 +11,29 @@ const waveform = [18, 34, 52, 28, 66, 44, 74, 38, 58, 86, 50, 72, 40, 62, 30, 78
 
 export const AssetArtwork = memo(function AssetArtwork({ asset, large = false }: AssetArtworkProps) {
   const style = useMemo(() => asset.previewUrl ? { backgroundImage: `url(${asset.previewUrl})` } : undefined, [asset.previewUrl]);
+  const showVideoFrame = useCallback((event: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      video.currentTime = Math.min(0.1, video.duration / 2);
+    }
+  }, []);
 
   if (asset.previewUrl) {
     return <div className="asset-image" style={style} role="img" aria-label={asset.displayName} />;
+  }
+
+  if (asset.kind === "video" && asset.assetUrl) {
+    return (
+      <video
+        className="asset-video-thumbnail"
+        src={asset.assetUrl}
+        preload="metadata"
+        muted
+        playsInline
+        aria-label={`${asset.displayName} 视频缩略图`}
+        onLoadedMetadata={showVideoFrame}
+      />
+    );
   }
 
   if (asset.kind === "audio") {
@@ -22,7 +42,6 @@ export const AssetArtwork = memo(function AssetArtwork({ asset, large = false }:
         <div className="waveform" aria-hidden="true">
           {waveform.map((height, index) => <span key={index} style={{ height: `${large ? height * 1.35 : height}%` }} />)}
         </div>
-        <span className="media-play"><Play size={large ? 30 : 20} fill="currentColor" /></span>
       </div>
     );
   }

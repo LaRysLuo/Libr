@@ -17,7 +17,7 @@ import {
 import { memo, useMemo, useState } from "react";
 import type { Folder, NavigationCounts, SmartFolder } from "../types";
 import type { NavigationScope } from "../hooks/useLibraryController";
-import { ASSET_DRAG_TYPE, readDraggedAssetIds } from "../lib/drag";
+import { hasDraggedAssets, readDraggedAssetIds } from "../lib/drag";
 
 interface SidebarProps {
   scope: NavigationScope;
@@ -39,16 +39,18 @@ interface NavRowProps {
   disclosure?: "open" | "closed";
   onClick: () => void;
   dropActive?: boolean;
+  dropFolderId?: string;
   onDragOver?: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDragLeave?: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDrop?: (event: React.DragEvent<HTMLButtonElement>) => void;
 }
 
-const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, disclosure, onClick, dropActive, onDragOver, onDragLeave, onDrop }: NavRowProps) {
+const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, disclosure, onClick, dropActive, dropFolderId, onDragOver, onDragLeave, onDrop }: NavRowProps) {
   return (
     <button
       type="button"
       className={`sidebar-row ${selected ? "is-selected" : ""} ${dropActive ? "is-drop-target" : ""}`}
+      data-folder-drop-target={dropFolderId}
       style={{ paddingInlineStart: `${12 + depth * 16}px` }}
       onClick={onClick}
       onDragOver={onDragOver}
@@ -58,7 +60,9 @@ const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, d
       {disclosure === "open" ? <ChevronDown size={13} /> : disclosure === "closed" ? <ChevronRight size={13} /> : <span className="disclosure-space" />}
       <span className="sidebar-icon">{icon}</span>
       <span className="sidebar-label">{label}</span>
-      {typeof count === "number" ? <span className="sidebar-count">{count.toLocaleString("zh-CN")}</span> : null}
+      {dropActive
+        ? <span className="sidebar-drop-hint">松开添加</span>
+        : typeof count === "number" ? <span className="sidebar-count">{count.toLocaleString("zh-CN")}</span> : null}
     </button>
   );
 });
@@ -91,11 +95,13 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
   });
 
   const dropHandlers = (folderId: string) => ({
+    dropFolderId: folderId,
     dropActive: dropTargetId === folderId,
     onDragOver: (event: React.DragEvent<HTMLButtonElement>) => {
-      if (!Array.from(event.dataTransfer.types).includes(ASSET_DRAG_TYPE)) return;
+      if (!hasDraggedAssets(event.dataTransfer)) return;
       event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
       setDropTargetId(folderId);
     },
     onDragLeave: (event: React.DragEvent<HTMLButtonElement>) => {
@@ -103,8 +109,10 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
     },
     onDrop: (event: React.DragEvent<HTMLButtonElement>) => {
       event.preventDefault();
+      event.stopPropagation();
       const assetIds = readDraggedAssetIds(event.dataTransfer);
       setDropTargetId(null);
+      document.documentElement.classList.remove("is-asset-dragging");
       if (assetIds.length) void onAssignAssets(assetIds, folderId);
     },
   });

@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { mockAssets, mockFolders, mockSmartFolders } from "../data/mockAssets";
 import { assetApi, assetProtocolUrl, isTauriRuntime, libraryApi, organizationApi } from "../lib/tauri";
 import type { Asset, AssetKind, AssetPatch, Folder, JobProgress, LibraryInfo, NavigationCounts, SearchQuery, SmartFolder, Tag } from "../types";
@@ -36,6 +36,19 @@ export type AspectFilter = "all" | "landscape" | "portrait" | "square";
 
 const mockTags = Array.from(new Map(mockAssets.flatMap((asset) => asset.tags).map((tag) => [tag.id, tag])).values());
 
+const applyAssetPatch = (asset: Asset, patch: AssetPatch, availableTags: Tag[]): Asset => {
+  const next = { ...asset };
+  if (patch.displayName !== undefined) next.displayName = patch.displayName;
+  if (patch.rating !== undefined) next.rating = patch.rating;
+  if (patch.favorite !== undefined) next.favorite = patch.favorite;
+  if (patch.notes !== undefined) next.notes = patch.notes;
+  if (patch.clearColorLabel) next.colorLabel = null;
+  else if (patch.colorLabel !== undefined) next.colorLabel = patch.colorLabel;
+  if (patch.tagIds !== undefined) next.tags = availableTags.filter((tag) => patch.tagIds?.includes(tag.id));
+  if (patch.folderIds !== undefined) next.folderIds = patch.folderIds;
+  return next;
+};
+
 const importedAfterFor = (filter: DateFilter | "recent") => {
   if (filter === "all") return undefined;
   const date = new Date();
@@ -71,6 +84,7 @@ export function useLibraryController() {
   const [folders, setFolders] = useState<Folder[]>(isTauriRuntime() ? [] : mockFolders);
   const [smartFolders, setSmartFolders] = useState<SmartFolder[]>(isTauriRuntime() ? [] : mockSmartFolders);
   const [tags, setTags] = useState<Tag[]>(isTauriRuntime() ? [] : mockTags);
+  const tagsRef = useRef(tags);
   const [scope, setScope] = useState<NavigationScope>("all");
   const [searchText, setSearchText] = useState("");
   const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
@@ -97,6 +111,7 @@ export function useLibraryController() {
     ]);
     setFolders(nextFolders);
     setSmartFolders(nextSmartFolders);
+    tagsRef.current = nextTags;
     setTags(nextTags);
   }, []);
 
@@ -237,7 +252,6 @@ export function useLibraryController() {
   }, [aspectFilter, assets, colorFilter, dateFilter, deferredSearch, folderFilter, kindFilter, minimumRating, scope, sizeFilter, sortBy, tagFilter]);
 
   const selectedAssets = useMemo(() => visibleAssets.filter((asset) => selectedIds.has(asset.id)), [selectedIds, visibleAssets]);
-  const primaryAsset = selectedAssets.at(-1) ?? null;
   const navigationCounts = useMemo<NavigationCounts>(() => {
     if (isTauriRuntime()) {
       return {
@@ -281,32 +295,54 @@ export function useLibraryController() {
     });
   }, [visibleAssets]);
 
-  const updateAsset = useCallback(async (assetId: string, patch: AssetPatch) => {
+  const updateAssets = useCallback(async (
+    assetIds: string[],
+    patchOrFactory: AssetPatch | ((asset: Asset) => AssetPatch),
+  ) => {
+    const idSet = new Set(assetIds);
+    const operations = assets
+      .filter((asset) => idSet.has(asset.id))
+      .map((asset) => ({
+        asset,
+        patch: typeof patchOrFactory === "function" ? patchOrFactory(asset) : patchOrFactory,
+      }));
+    if (!operations.length) return;
+    const patches = new Map(operations.map(({ asset, patch }) => [asset.id, patch]));
+    const folderDeltas = new Map<string, number>();
+    for (const { asset, patch } of operations) {
+      if (patch.folderIds === undefined) continue;
+      const previous = new Set(asset.folderIds);
+      const next = new Set(patch.folderIds);
+      for (const id of previous) if (!next.has(id)) folderDeltas.set(id, (folderDeltas.get(id) ?? 0) - 1);
+      for (const id of next) if (!previous.has(id)) folderDeltas.set(id, (folderDeltas.get(id) ?? 0) + 1);
+    }
     setAssets((current) => current.map((asset) => {
-      if (asset.id !== assetId) return asset;
-      const next: Asset = { ...asset, ...patch };
-      if (patch.tagIds) next.tags = tags.filter((tag) => patch.tagIds?.includes(tag.id));
-      if (patch.clearColorLabel) next.colorLabel = null;
-      return next;
+      const patch = patches.get(asset.id);
+      return patch ? applyAssetPatch(asset, patch, tagsRef.current) : asset;
     }));
+    if (folderDeltas.size) {
+      setFolders((current) => current.map((folder) => ({
+        ...folder,
+        itemCount: Math.max(0, folder.itemCount + (folderDeltas.get(folder.id) ?? 0)),
+      })));
+    }
     if (!isTauriRuntime()) return;
     try {
-      const updated = await assetApi.update(assetId, patch);
-      setAssets((current) => current.map((asset) => asset.id === assetId ? {
-        ...updated,
-        previewUrl: updated.previewUrl && updated.streamToken ? assetProtocolUrl(updated.streamToken, true) : null,
-        assetUrl: updated.streamToken ? assetProtocolUrl(updated.streamToken, false) : null,
-      } : asset));
+      await Promise.all(operations.map(({ asset, patch }) => assetApi.update(asset.id, patch)));
       await Promise.all([
         reloadAssets(),
         refreshLibraryInfo(),
-        patch.folderIds ? loadOrganization() : Promise.resolve(),
+        folderDeltas.size ? loadOrganization() : Promise.resolve(),
       ]);
     } catch (reason) {
       setError(String(reason));
-      await reloadAssets();
+      await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
     }
-  }, [loadOrganization, refreshLibraryInfo, reloadAssets, tags]);
+  }, [assets, loadOrganization, refreshLibraryInfo, reloadAssets]);
+
+  const updateAsset = useCallback((assetId: string, patch: AssetPatch) => (
+    updateAssets([assetId], patch)
+  ), [updateAssets]);
 
   const openLibrary = useCallback(async (path: string) => {
     const info = await libraryApi.open(path);
@@ -362,6 +398,19 @@ export function useLibraryController() {
       setFolders((current) => [...current, { id: `folder-${crypto.randomUUID()}`, name: trimmed, itemCount: 0, sortOrder: current.length }]);
     }
   }, [loadOrganization]);
+
+  const createTag = useCallback(async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    const existing = tags.find((tag) => tag.name.localeCompare(trimmed, "zh-CN", { sensitivity: "accent" }) === 0);
+    if (existing) return existing;
+    const created = isTauriRuntime()
+      ? await organizationApi.createTag(trimmed)
+      : { id: `tag-${crypto.randomUUID()}`, name: trimmed };
+    tagsRef.current = [...tagsRef.current, created].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+    setTags(tagsRef.current);
+    return created;
+  }, [tags]);
 
   const createSmartFolder = useCallback(async (name: string) => {
     const trimmed = name.trim();
@@ -439,7 +488,6 @@ export function useLibraryController() {
     navigationCounts,
     selectedIds,
     selectedAssets,
-    primaryAsset,
     scope,
     searchText,
     kindFilter,
@@ -470,11 +518,13 @@ export function useLibraryController() {
     selectAsset,
     setSelectedIds,
     updateAsset,
+    updateAssets,
     openLibrary,
     createLibrary,
     importPaths,
     assignAssetsToFolder,
     createFolder,
+    createTag,
     createSmartFolder,
     trashAssets,
     restoreAssets,

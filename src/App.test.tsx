@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { vi } from "vitest";
 import App from "./App";
+import { mockAssets } from "./data/mockAssets";
 
 describe("Libr desktop shell", () => {
   it("renders the complete library workspace", () => {
@@ -73,9 +75,9 @@ describe("Libr desktop shell", () => {
     expect(countFor("回收站")).toHaveTextContent("0");
 
     const inspector = document.querySelector(".inspector")!;
-    await user.click(within(inspector as HTMLElement).getByRole("button", { name: "取消收藏" }));
+    await user.click(within(inspector as HTMLElement).getByRole("button", { name: "取消收藏所选资源" }));
     expect(countFor("收藏")).toHaveTextContent("2");
-    await user.click(within(inspector as HTMLElement).getByRole("button", { name: "移到回收站" }));
+    await user.click(within(inspector as HTMLElement).getByRole("button", { name: "将所选资源移到回收站" }));
     expect(countFor("全部资源")).toHaveTextContent("18");
     expect(countFor("回收站")).toHaveTextContent("1");
   });
@@ -103,8 +105,93 @@ describe("Libr desktop shell", () => {
     fireEvent.dragStart(card, { dataTransfer });
     fireEvent.dragOver(folderRow, { dataTransfer });
     expect(folderRow).toHaveClass("is-drop-target");
+    expect(within(folderRow).getByText("松开添加")).toBeInTheDocument();
     fireEvent.drop(folderRow, { dataTransfer });
     await waitFor(() => expect(within(folderRow).getByText("2")).toBeInTheDocument());
     expect(await screen.findByText(/已将 1 项资源添加到“文档”/)).toBeInTheDocument();
+  });
+
+  it("uses a compact pointer preview and folder feedback during desktop dragging", async () => {
+    render(<App />);
+    const card = screen.getAllByText("DSC_0876.jpg")[0].closest(".asset-card")!;
+    const folderRow = screen.getAllByText("素材源文件").find((element) => element.classList.contains("sidebar-label"))!.closest("button")!;
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => folderRow });
+    const pointerEvent = (type: string, clientX: number, clientY: number) => {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX, clientY });
+      Object.defineProperty(event, "pointerId", { value: 7 });
+      return event;
+    };
+
+    try {
+      fireEvent(card, pointerEvent("pointerdown", 400, 200));
+      fireEvent(window, pointerEvent("pointermove", 120, 640));
+      expect(document.documentElement).toHaveClass("is-asset-dragging");
+      expect(document.querySelector(".asset-drag-preview")).not.toBeNull();
+      expect(folderRow).toHaveClass("is-drop-target");
+      fireEvent(window, pointerEvent("pointerup", 120, 640));
+      await waitFor(() => expect(within(folderRow).getByText("1")).toBeInTheDocument());
+      expect(await screen.findByText(/已将 1 项资源添加到“素材源文件”/)).toBeInTheDocument();
+      expect(document.documentElement).not.toHaveClass("is-asset-dragging");
+      expect(document.querySelector(".asset-drag-preview")).toBeNull();
+    } finally {
+      if (originalElementFromPoint) Object.defineProperty(document, "elementFromPoint", { configurable: true, value: originalElementFromPoint });
+      else Reflect.deleteProperty(document, "elementFromPoint");
+    }
+  });
+
+  it("shows a real video frame surface and keeps audio controls stateful", async () => {
+    const user = userEvent.setup();
+    const video = mockAssets.find((asset) => asset.id === "asset-city")!;
+    const audio = mockAssets.find((asset) => asset.id === "asset-audio")!;
+    const originalVideoPreview = video.previewUrl;
+    const originalVideoUrl = video.assetUrl;
+    const originalAudioUrl = audio.assetUrl;
+    video.previewUrl = null;
+    video.assetUrl = "data:video/mp4;base64,";
+    audio.assetUrl = "data:audio/mpeg;base64,";
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+
+    try {
+      render(<App />);
+      expect(screen.getByLabelText("城市延时.mp4 视频缩略图")).toBeInstanceOf(HTMLVideoElement);
+      await user.click(screen.getByRole("button", { name: "播放 背景音乐.mp3" }));
+      expect(await screen.findByRole("button", { name: "暂停 背景音乐.mp3" })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "暂停 背景音乐.mp3" }));
+      expect(pause).toHaveBeenCalled();
+
+      const audioCard = screen.getByText("背景音乐.mp3").closest(".asset-card")!;
+      await user.dblClick(audioCard);
+      const dialog = screen.getByRole("dialog", { name: "预览 背景音乐.mp3" });
+      expect(dialog.querySelector("audio[controls]")).not.toBeNull();
+      expect(dialog.querySelector(".media-play")).toBeNull();
+    } finally {
+      video.previewUrl = originalVideoPreview;
+      video.assetUrl = originalVideoUrl;
+      audio.assetUrl = originalAudioUrl;
+      play.mockRestore();
+      pause.mockRestore();
+    }
+  });
+
+  it("batch edits folders and creates tags for every selected asset", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const cityCard = screen.getByText("城市延时.mp4").closest(".asset-card")!;
+    fireEvent.click(cityCard, { ctrlKey: true });
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    await waitFor(() => expect(within(inspector).getByText("已选择 2 项")).toBeInTheDocument());
+
+    const documentRow = screen.getAllByText("文档").find((element) => element.classList.contains("sidebar-label"))!.closest("button")!;
+    expect(within(documentRow).getByText("1")).toBeInTheDocument();
+    await user.click(within(inspector).getByRole("button", { name: "添加到文件夹" }));
+    await user.click(within(inspector).getByRole("button", { name: "文档" }));
+    await waitFor(() => expect(within(documentRow).getByText("3")).toBeInTheDocument());
+
+    await user.click(within(inspector).getByRole("button", { name: "添加标签" }));
+    await user.type(within(inspector).getByRole("textbox", { name: "新标签名称" }), "待审核");
+    await user.click(within(inspector).getByRole("button", { name: "创建并添加" }));
+    await waitFor(() => expect(within(inspector).getByRole("button", { name: "移除标签 待审核" })).toBeInTheDocument());
   });
 });

@@ -1,5 +1,5 @@
 import { AlertCircle, CheckCircle2, Copy, Database, FilePlus2, FolderOpen, RefreshCw, Save, Settings, ShieldCheck, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppHeader } from "./components/AppHeader";
 import { AssetGrid } from "./components/AssetGrid";
 import { FilterBar } from "./components/FilterBar";
@@ -55,7 +55,9 @@ function App() {
     import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
       getCurrentWebview().onDragDropEvent((event) => {
         if (event.payload.type === "drop") {
-          void controller.importPaths(event.payload.paths).then((result) => {
+          const paths = event.payload.paths.filter(Boolean);
+          if (paths.length === 0) return;
+          void controller.importPaths(paths).then((result) => {
             setToast({ kind: "success", message: `已导入 ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项` });
           }).catch((reason) => setToast({ kind: "error", message: String(reason) }));
         }
@@ -114,17 +116,29 @@ function App() {
     await assetApi.openExternal(asset.id);
   };
 
-  const exportAsset = async (asset: Asset) => {
+  const exportSelection = async (assets: Asset[]) => {
+    if (!assets.length) return;
     if (!isTauriRuntime()) {
-      setToast({ kind: "success", message: `“${asset.displayName}”导出入口工作正常` });
+      setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”导出入口工作正常` : `已准备导出 ${assets.length} 项资源` });
       return;
     }
     const { open } = await import("@tauri-apps/plugin-dialog");
     const destination = await open({ directory: true, multiple: false });
     if (typeof destination !== "string") return;
-    await controller.exportAssets([asset.id], destination);
-    setToast({ kind: "success", message: `已导出“${asset.displayName}”` });
+    await controller.exportAssets(assets.map((asset) => asset.id), destination);
+    setToast({ kind: "success", message: assets.length === 1 ? `已导出“${assets[0].displayName}”` : `已导出 ${assets.length} 项资源` });
   };
+
+  const assignAssetsToFolder = useCallback(async (assetIds: string[], folderId: string) => {
+    const folder = controller.folders.find((item) => item.id === folderId);
+    const assigned = await controller.assignAssetsToFolder(assetIds, folderId);
+    setToast({
+      kind: "success",
+      message: assigned > 0
+        ? `已将 ${assigned} 项资源添加到“${folder?.name ?? "文件夹"}”`
+        : `所选资源已在“${folder?.name ?? "文件夹"}”中`,
+    });
+  }, [controller.assignAssetsToFolder, controller.folders]);
 
   const inspectIntegrity = async () => {
     setLibraryMenuOpen(false);
@@ -205,16 +219,7 @@ function App() {
             onScope={controller.setScope}
             onCreateFolder={controller.createFolder}
             onCreateSmartFolder={controller.createSmartFolder}
-            onAssignAssets={async (assetIds, folderId) => {
-              const folder = controller.folders.find((item) => item.id === folderId);
-              const assigned = await controller.assignAssetsToFolder(assetIds, folderId);
-              setToast({
-                kind: "success",
-                message: assigned > 0
-                  ? `已将 ${assigned} 项资源添加到“${folder?.name ?? "文件夹"}”`
-                  : `所选资源已在“${folder?.name ?? "文件夹"}”中`,
-              });
-            }}
+            onAssignAssets={assignAssetsToFolder}
           />
         ) : null}
 
@@ -251,21 +256,22 @@ function App() {
             onSelect={controller.selectAsset}
             onOpen={setFocusAsset}
             onToggleFavorite={(asset) => void controller.updateAsset(asset.id, { favorite: !asset.favorite })}
+            onAssignAssets={assignAssetsToFolder}
           />
         </main>
 
         {inspectorVisible ? (
           <Inspector
-            asset={controller.primaryAsset}
-            selectionCount={controller.selectedIds.size}
+            assets={controller.selectedAssets}
             availableTags={controller.tags}
             folders={controller.folders}
-            onUpdate={(assetId, patch) => void controller.updateAsset(assetId, patch)}
+            onUpdate={(assetIds, patch) => void controller.updateAssets(assetIds, patch)}
+            onCreateTag={controller.createTag}
             onOpenExternal={(asset) => void openExternal(asset)}
-            onTrash={(asset) => { void controller.trashAssets([asset.id]); setToast({ kind: "success", message: `“${asset.displayName}”已移到回收站` }); }}
-            onRestore={(asset) => { void controller.restoreAssets([asset.id]); setToast({ kind: "success", message: `“${asset.displayName}”已恢复` }); }}
-            onPurge={(asset) => { if (window.confirm(`将永久删除“${asset.displayName}”，此操作无法撤销。`)) { void controller.purgeAssets([asset.id]); setToast({ kind: "success", message: `“${asset.displayName}”已永久删除` }); } }}
-            onExport={(asset) => void exportAsset(asset)}
+            onTrash={(assets) => { void controller.trashAssets(assets.map((asset) => asset.id)); setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已移到回收站` : `${assets.length} 项资源已移到回收站` }); }}
+            onRestore={(assets) => { void controller.restoreAssets(assets.map((asset) => asset.id)); setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已恢复` : `${assets.length} 项资源已恢复` }); }}
+            onPurge={(assets) => { if (window.confirm(assets.length === 1 ? `将永久删除“${assets[0].displayName}”，此操作无法撤销。` : `将永久删除所选 ${assets.length} 项资源，此操作无法撤销。`)) { void controller.purgeAssets(assets.map((asset) => asset.id)); setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已永久删除` : `${assets.length} 项资源已永久删除` }); } }}
+            onExport={(assets) => void exportSelection(assets)}
           />
         ) : null}
       </div>
