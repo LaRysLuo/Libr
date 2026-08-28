@@ -3,6 +3,15 @@ name: Release Libr
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and update
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -23,12 +32,6 @@ jobs:
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
 
@@ -49,23 +52,38 @@ jobs:
         shell: bash
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          test "v$VERSION" = "$GITHUB_REF_NAME"
-      - name: Require release signing secrets
+          test "v$VERSION" = "$RELEASE_TAG"
+      - name: Require updater signing secret
         shell: bash
         run: |
           test -n "$TAURI_SIGNING_PRIVATE_KEY"
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            if [ -z "$APPLE_CERTIFICATE" ]; then
-              echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-              echo "Apple signing secrets are absent; using ad-hoc signing."
-            else
-              test -n "$APPLE_CERTIFICATE_PASSWORD"
-              test -n "$APPLE_SIGNING_IDENTITY"
-              test -n "$APPLE_ID"
-              test -n "$APPLE_PASSWORD"
-              test -n "$APPLE_TEAM_ID"
-            fi
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          RELEASE_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          RELEASE_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          RELEASE_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          RELEASE_APPLE_ID: ${{ secrets.APPLE_ID }}
+          RELEASE_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          RELEASE_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$RELEASE_APPLE_CERTIFICATE" ]; then
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "Apple signing secrets are absent; using ad-hoc signing."
+            exit 0
           fi
+          test -n "$RELEASE_APPLE_CERTIFICATE_PASSWORD"
+          test -n "$RELEASE_APPLE_SIGNING_IDENTITY"
+          test -n "$RELEASE_APPLE_ID"
+          test -n "$RELEASE_APPLE_PASSWORD"
+          test -n "$RELEASE_APPLE_TEAM_ID"
+          echo "APPLE_CERTIFICATE=$RELEASE_APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+          echo "APPLE_CERTIFICATE_PASSWORD=$RELEASE_APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=$RELEASE_APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo "APPLE_ID=$RELEASE_APPLE_ID" >> "$GITHUB_ENV"
+          echo "APPLE_PASSWORD=$RELEASE_APPLE_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=$RELEASE_APPLE_TEAM_ID" >> "$GITHUB_ENV"
       - name: Import Windows Authenticode certificate
         if: runner.os == 'Windows'
         shell: pwsh
@@ -96,14 +114,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Libr ${{ github.ref_name }}
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Libr ${{ env.RELEASE_TAG }}
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
-          uploadUpdaterSignatures: true
+          updaterJsonKeepUniversal: true
           args: ${{ matrix.args }}
 
   finalize-updater-json:
@@ -115,7 +133,7 @@ jobs:
       - name: Publish custom universal updater target
         run: |
           mkdir updater
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir updater
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir updater
           jq '.platforms["darwin-universal"] = (.platforms["darwin-universal"] // .platforms["darwin-aarch64"] // .platforms["darwin-x86_64"]) | del(.platforms["darwin-aarch64"], .platforms["darwin-x86_64"])' updater/latest.json > updater/latest.final.json
           mv updater/latest.final.json updater/latest.json
-          gh release upload "$GITHUB_REF_NAME" updater/latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" updater/latest.json --repo "$GITHUB_REPOSITORY" --clobber
