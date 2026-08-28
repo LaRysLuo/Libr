@@ -9,13 +9,13 @@ const demoLibrary: LibraryInfo = {
   path: "我的素材.libr",
   schemaVersion: 1,
   readOnly: false,
-  assetCount: 1268,
-  recentCount: 342,
-  unfiledCount: 18,
-  favoriteCount: 214,
-  duplicateCount: 12,
-  trashCount: 36,
-  totalBytes: 48_260_000_000,
+  assetCount: mockAssets.length,
+  recentCount: mockAssets.length,
+  unfiledCount: mockAssets.filter((asset) => asset.folderIds.length === 0).length,
+  favoriteCount: mockAssets.filter((asset) => asset.favorite).length,
+  duplicateCount: mockAssets.filter((asset) => (asset.duplicateCount ?? 0) > 0).length,
+  trashCount: mockAssets.filter((asset) => Boolean(asset.deletedAt)).length,
+  totalBytes: mockAssets.reduce((total, asset) => total + asset.byteSize, 0),
   createdAt: "2026-01-16T10:00:00+08:00",
   updatedAt: "2026-08-28T09:42:00+08:00",
 };
@@ -100,6 +100,12 @@ export function useLibraryController() {
     setTags(nextTags);
   }, []);
 
+  const refreshLibraryInfo = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    const info = await libraryApi.inspect();
+    if (info) setLibrary(info);
+  }, []);
+
   const reloadAssets = useCallback(async (override?: Partial<SearchQuery>) => {
     if (!isTauriRuntime()) return;
     const folderId = scope.startsWith("folder:") ? scope.slice(7) : undefined;
@@ -162,10 +168,15 @@ export function useLibraryController() {
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
-    let unlisten: (() => void) | undefined;
-    import("@tauri-apps/api/event").then(({ listen }) => listen<JobProgress>("job-progress", ({ payload }) => setJobProgress(payload))).then((dispose) => { unlisten = dispose; });
-    return () => unlisten?.();
-  }, []);
+    const disposers: Array<() => void> = [];
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      disposers.push(await listen<JobProgress>("job-progress", ({ payload }) => setJobProgress(payload)));
+      disposers.push(await listen("library-changed", () => {
+        void Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
+      }));
+    });
+    return () => disposers.forEach((dispose) => dispose());
+  }, [loadOrganization, refreshLibraryInfo, reloadAssets]);
 
   useEffect(() => {
     if (!jobProgress || jobProgress.phase === "running" || jobProgress.phase === "queued") return;
@@ -227,14 +238,28 @@ export function useLibraryController() {
 
   const selectedAssets = useMemo(() => visibleAssets.filter((asset) => selectedIds.has(asset.id)), [selectedIds, visibleAssets]);
   const primaryAsset = selectedAssets.at(-1) ?? null;
-  const navigationCounts: NavigationCounts = {
-    all: library?.assetCount ?? 0,
-    recent: library?.recentCount ?? 0,
-    unfiled: library?.unfiledCount ?? 0,
-    favorites: library?.favoriteCount ?? 0,
-    duplicates: library?.duplicateCount ?? 0,
-    trash: library?.trashCount ?? 0,
-  };
+  const navigationCounts = useMemo<NavigationCounts>(() => {
+    if (isTauriRuntime()) {
+      return {
+        all: library?.assetCount ?? 0,
+        recent: library?.recentCount ?? 0,
+        unfiled: library?.unfiledCount ?? 0,
+        favorites: library?.favoriteCount ?? 0,
+        duplicates: library?.duplicateCount ?? 0,
+        trash: library?.trashCount ?? 0,
+      };
+    }
+    const recentAfter = importedAfterFor("recent") ?? "";
+    const activeAssets = assets.filter((asset) => !asset.deletedAt);
+    return {
+      all: activeAssets.length,
+      recent: activeAssets.filter((asset) => asset.importedAt >= recentAfter).length,
+      unfiled: activeAssets.filter((asset) => asset.folderIds.length === 0).length,
+      favorites: activeAssets.filter((asset) => asset.favorite).length,
+      duplicates: activeAssets.filter((asset) => (asset.duplicateCount ?? 0) > 0).length,
+      trash: assets.length - activeAssets.length,
+    };
+  }, [assets, library]);
 
   const selectAsset = useCallback((id: string, additive = false, range = false) => {
     setSelectedIds((previous) => {

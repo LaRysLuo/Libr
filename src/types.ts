@@ -138,6 +138,7 @@ export interface JobProgress {
 export type UpdateState =
   | { status: "idle" }
   | { status: "checking" }
+  | { status: "upToDate"; currentVersion: string }
   | { status: "available"; version: string; notes: string; size?: number }
   | { status: "downloading"; version: string; progress: number }
   | { status: "ready"; version: string }

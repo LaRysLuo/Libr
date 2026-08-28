@@ -48,6 +48,8 @@ export const assetApi = {
 
 export const organizationApi = {
   folders: () => call<Folder[]>("folder_list"),
+  assignAssets: (folderId: string, assetIds: string[]) =>
+    call<number>("folder_assign_assets", { folderId, assetIds }),
   createFolder: (name: string, parentId?: string) =>
     call<Folder>("folder_create", { name, parentId: parentId ?? null }),
   updateFolder: (id: string, name: string, parentId?: string) =>

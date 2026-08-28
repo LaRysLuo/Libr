@@ -53,6 +53,7 @@ pub fn run() {
             commands::asset_export,
             commands::asset_open_external,
             commands::folder_list,
+            commands::folder_assign_assets,
             commands::folder_create,
             commands::folder_update,
             commands::folder_delete,

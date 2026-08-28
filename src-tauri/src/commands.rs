@@ -337,6 +337,20 @@ pub fn folder_list(state: State<'_, AppState>) -> LibrResult<Vec<Folder>> {
 }
 
 #[tauri::command]
+pub fn folder_assign_assets(
+    state: State<'_, AppState>,
+    folder_id: String,
+    asset_ids: Vec<String>,
+) -> LibrResult<usize> {
+    let mut guard = state.session.lock();
+    db::assign_assets_to_folder(
+        guard.as_mut().ok_or(LibrError::NoLibrary)?,
+        &folder_id,
+        &asset_ids,
+    )
+}
+
+#[tauri::command]
 pub fn folder_create(
     state: State<'_, AppState>,
     name: String,

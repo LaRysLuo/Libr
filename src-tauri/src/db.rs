@@ -773,6 +773,39 @@ pub fn list_folders(session: &LibrarySession) -> LibrResult<Vec<Folder>> {
     Ok(folders)
 }
 
+pub fn assign_assets_to_folder(
+    session: &mut LibrarySession,
+    folder_id: &str,
+    asset_ids: &[String],
+) -> LibrResult<usize> {
+    if session.read_only {
+        return Err(LibrError::ReadOnly);
+    }
+    let transaction = session.conn.transaction()?;
+    let folder_exists = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM folders WHERE id = ?1)",
+        [folder_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !folder_exists {
+        return Err(LibrError::Other("目标文件夹不存在".into()));
+    }
+
+    let mut assigned = 0;
+    for asset_id in asset_ids {
+        assigned += transaction.execute(
+            "INSERT OR IGNORE INTO asset_folders(asset_id, folder_id)
+             SELECT id, ?2 FROM assets WHERE id = ?1 AND deleted_at IS NULL",
+            params![asset_id, folder_id],
+        )?;
+    }
+    if assigned > 0 {
+        touch_library(&transaction)?;
+    }
+    transaction.commit()?;
+    Ok(assigned)
+}
+
 pub fn create_folder(
     session: &mut LibrarySession,
     name: &str,
