@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Libr app icon">
+  <rect width="1024" height="1024" rx="224" fill="#246BFE"/>
+  <path fill="#DCE9FF" d="M486 208h250a48 48 0 0 1 48 48v330H486z"/>
+  <path fill="#FFFFFF" d="M270 270h376a48 48 0 0 1 48 48v328H270z"/>
+  <rect x="338" y="346" width="196" height="150" rx="24" fill="#246BFE"/>
+  <circle cx="386" cy="394" r="20" fill="#FFFFFF"/>
+  <path fill="#FFFFFF" d="m362 458 48-48 34 34 34-40 36 54z"/>
+  <rect x="338" y="540" width="280" height="28" rx="14" fill="#246BFE"/>
+  <rect x="338" y="592" width="214" height="28" rx="14" fill="#246BFE"/>
+  <path fill="#FFFFFF" d="M174 574h92v98h492v-98h92l70 122v82a66 66 0 0 1-66 66H170a66 66 0 0 1-66-66v-82z"/>
+  <rect x="426" y="732" width="172" height="34" rx="17" fill="#246BFE"/>
+</svg>

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+src-tauri/target/
+src-tauri/gen/
+.idea/
+.vscode/
+coverage/
+*.libr
+*.libr-journal
+keys/*.key
+keys/*.pem
