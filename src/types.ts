@@ -163,4 +163,15 @@ export interface ImportResult {
   imported: Asset[];
   duplicates: number;
   failed: Array<{ path: string; message: string }>;
+  deletedOriginals: number;
+  sourceDeleteFailures: Array<{ path: string; message: string }>;
+}
+
+export interface LanShareInfo {
+  active: boolean;
+  folderId?: string | null;
+  folderName?: string | null;
+  permission?: "readOnly" | "manage" | null;
+  url?: string | null;
+  port?: number | null;
 }

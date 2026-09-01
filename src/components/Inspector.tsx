@@ -1,5 +1,6 @@
 import { Check, ChevronDown, Download, ExternalLink, Plus, RotateCcw, Star, Trash2 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
+import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import type { Asset, AssetPatch, Folder, Tag } from "../types";
 import { AssetArtwork } from "./AssetArtwork";
 
@@ -48,6 +49,8 @@ function NotesEditor({ assets, onCommit }: { assets: Asset[]; onCommit: (notes: 
 export const Inspector = memo(function Inspector({ assets, availableTags, folders, onUpdate, onCreateTag, onOpenExternal, onTrash, onRestore, onPurge, onExport }: InspectorProps) {
   const [picker, setPicker] = useState<"tags" | "folders" | null>(null);
   const [newTagName, setNewTagName] = useState("");
+  const tagPickerRef = useRef<HTMLElement>(null);
+  const folderPickerRef = useRef<HTMLElement>(null);
   const asset = assets.at(-1) ?? null;
   const assetIds = useMemo(() => assets.map((item) => item.id), [assets]);
   const selectionKey = assetIds.join(":");
@@ -60,6 +63,17 @@ export const Inspector = memo(function Inspector({ assets, availableTags, folder
     return [...union.values()];
   }, [assets]);
   const selectedFolders = useMemo(() => folders.filter((folder) => assets.some((item) => item.folderIds.includes(folder.id))), [assets, folders]);
+
+  useDismissibleLayer({
+    open: picker === "tags",
+    layerRef: tagPickerRef,
+    onDismiss: () => setPicker(null),
+  });
+  useDismissibleLayer({
+    open: picker === "folders",
+    layerRef: folderPickerRef,
+    onDismiss: () => setPicker(null),
+  });
 
   if (!asset) {
     return (
@@ -138,17 +152,17 @@ export const Inspector = memo(function Inspector({ assets, availableTags, folder
         </div>
       </section>
 
-      <section className="inspector-section">
+      <section ref={tagPickerRef} className="inspector-section">
         <h3>标签{multiple ? <small>批量</small> : null}</h3>
         <div className="tag-list">
           {visibleTags.map((tag) => {
             const onEveryAsset = assets.every((item) => item.tags.some((current) => current.id === tag.id));
             return <span key={tag.id} className={onEveryAsset ? "" : "is-partial"} title={onEveryAsset ? undefined : "仅部分所选资源包含此标签"}>{tag.name}<button type="button" aria-label={`移除标签 ${tag.name}`} onClick={() => { if (onEveryAsset) toggleTag(tag); else onUpdate(assetIds, (item) => ({ tagIds: item.tags.filter((current) => current.id !== tag.id).map((current) => current.id) })); }}>×</button></span>;
           })}
-          <button type="button" className="add-tag" aria-label="添加标签" onClick={() => setPicker(picker === "tags" ? null : "tags")}><Plus size={14} /></button>
+          <button type="button" className="add-tag" aria-label="添加标签" aria-expanded={picker === "tags"} aria-controls="tag-picker" onClick={() => setPicker(picker === "tags" ? null : "tags")}><Plus size={14} /></button>
         </div>
         {picker === "tags" ? (
-          <div className="inspector-picker-panel">
+          <div id="tag-picker" className="inspector-picker-panel">
             <div className="inspector-picker">
               {availableTags.map((tag) => {
                 const count = assets.filter((item) => item.tags.some((current) => current.id === tag.id)).length;
@@ -163,16 +177,16 @@ export const Inspector = memo(function Inspector({ assets, availableTags, folder
         ) : null}
       </section>
 
-      <section className="inspector-section">
+      <section ref={folderPickerRef} className="inspector-section">
         <h3>所在文件夹{multiple ? <small>批量</small> : null}</h3>
         <div className="tag-list folder-list">
           {selectedFolders.map((folder) => {
             const onEveryAsset = assets.every((item) => item.folderIds.includes(folder.id));
             return <span key={folder.id} className={onEveryAsset ? "" : "is-partial"}>{folder.name}<button type="button" aria-label={`移出文件夹 ${folder.name}`} onClick={() => { if (onEveryAsset) toggleFolder(folder.id); else onUpdate(assetIds, (item) => ({ folderIds: item.folderIds.filter((id) => id !== folder.id) })); }}>×</button></span>;
           })}
-          <button type="button" className="add-tag" aria-label="添加到文件夹" onClick={() => setPicker(picker === "folders" ? null : "folders")}><Plus size={14} /></button>
+          <button type="button" className="add-tag" aria-label="添加到文件夹" aria-expanded={picker === "folders"} aria-controls="folder-picker" onClick={() => setPicker(picker === "folders" ? null : "folders")}><Plus size={14} /></button>
         </div>
-        {picker === "folders" ? <div className="inspector-picker">{folders.map((folder) => {
+        {picker === "folders" ? <div id="folder-picker" className="inspector-picker">{folders.map((folder) => {
           const count = assets.filter((item) => item.folderIds.includes(folder.id)).length;
           return <button type="button" key={folder.id} className={count === assets.length ? "is-active" : count > 0 ? "is-partial" : ""} onClick={() => toggleFolder(folder.id)}>{folder.name}{count > 0 && count < assets.length ? ` (${count}/${assets.length})` : ""}</button>;
         })}</div> : null}

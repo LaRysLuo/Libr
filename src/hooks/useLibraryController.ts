@@ -380,10 +380,28 @@ export function useLibraryController() {
     setSmartFolders([]);
   }, []);
 
-  const importPaths = useCallback(async (paths: string[], folderId?: string) => {
+  const importPaths = useCallback(async (paths: string[], folderId?: string, deleteOriginals = false) => {
+    setJobProgress({
+      jobId: `pending-import-${Date.now()}`,
+      kind: "import",
+      completed: 0,
+      total: 0,
+      phase: "queued",
+      message: "正在扫描待导入文件…",
+    });
     setActiveJobs((count) => count + 1);
     try {
-      const result = await assetApi.import(paths, folderId);
+      let result;
+      try {
+        result = await assetApi.import(paths, folderId, deleteOriginals);
+      } catch (reason) {
+        setJobProgress((current) => current?.kind === "import" ? {
+          ...current,
+          phase: String(reason).includes("已取消") ? "cancelled" : "failed",
+          message: String(reason),
+        } : current);
+        throw reason;
+      }
       await Promise.all([reloadAssets(), refreshLibraryInfo(), loadOrganization()]);
       return result;
     } finally {

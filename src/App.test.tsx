@@ -21,6 +21,38 @@ describe("Libr desktop shell", () => {
     expect(screen.queryByText("城市延时.mp4")).not.toBeInTheDocument();
   });
 
+  it("renames an asset inline without replacing its extension", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "重命名 DSC_0876.jpg" }));
+    const input = screen.getByRole("textbox", { name: "重命名 DSC_0876.jpg" }) as HTMLInputElement;
+    expect(input).toHaveFocus();
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe("DSC_0876".length);
+
+    await user.keyboard("旅行照片");
+    await user.keyboard("{Enter}");
+
+    expect(screen.queryByRole("textbox", { name: "重命名 DSC_0876.jpg" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重命名 旅行照片.jpg" })).toBeInTheDocument();
+    expect(document.querySelector(".inspector-filename")).toHaveTextContent("旅行照片.jpg");
+  });
+
+  it("cancels an inline rename with Escape", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "重命名 DSC_0876.jpg" }));
+    const input = screen.getByRole("textbox", { name: "重命名 DSC_0876.jpg" });
+    await user.clear(input);
+    await user.type(input, "不保存.jpg");
+    await user.keyboard("{Escape}");
+
+    expect(screen.getByRole("button", { name: "重命名 DSC_0876.jpg" })).toBeInTheDocument();
+    expect(screen.queryByText("不保存.jpg")).not.toBeInTheDocument();
+  });
+
   it("opens and closes immersive preview", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -52,6 +84,64 @@ describe("Libr desktop shell", () => {
 
     expect(screen.queryByRole("menu", { name: "导入选项" })).not.toBeInTheDocument();
     expect(await screen.findByText(/所有子文件夹中的文件/)).toBeInTheDocument();
+  });
+
+  it("starts a permission-scoped LAN folder share", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /\.libr$/ }));
+    expect(within(screen.getByRole("menu", { name: "资源库操作" })).queryByRole("menuitem", { name: /局域网共享/ })).not.toBeInTheDocument();
+    await user.click(screen.getByPlaceholderText("搜索资源库…"));
+    await user.click(screen.getByRole("button", { name: "文件夹操作 素材源文件" }));
+    const folderMenu = screen.getByRole("menu", { name: "文件夹操作 素材源文件" });
+    expect(within(folderMenu).getByRole("menuitem", { name: "加密" })).toBeInTheDocument();
+    await user.click(within(folderMenu).getByRole("menuitem", { name: "局域网共享" }));
+    const dialog = screen.getByRole("dialog", { name: "局域网共享" });
+    expect(within(dialog).getByLabelText("共享文件夹")).toHaveValue("folder-source");
+    await user.click(within(dialog).getByRole("radio", { name: /可管理/ }));
+    await user.click(within(dialog).getByRole("button", { name: "开始共享" }));
+
+    expect(await within(dialog).findByText("正在共享")).toBeInTheDocument();
+    expect((within(dialog).getByLabelText("局域网共享链接") as HTMLInputElement).value).toMatch(/^http:\/\/192\.168\.1\.23:/);
+    expect(within(dialog).getByText("访问者可下载、重命名、收藏和移到回收站")).toBeInTheDocument();
+  });
+
+  it("dismisses dropdown menus and pickers when clicking elsewhere", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const search = screen.getByPlaceholderText("搜索资源库…");
+
+    await user.click(screen.getByRole("button", { name: /\.libr$/ }));
+    expect(screen.getByRole("menu", { name: "资源库操作" })).toBeInTheDocument();
+    await user.click(search);
+    expect(screen.queryByRole("menu", { name: "资源库操作" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "应用设置" }));
+    expect(screen.getByRole("menu", { name: "应用操作" })).toBeInTheDocument();
+    await user.click(search);
+    expect(screen.queryByRole("menu", { name: "应用操作" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "显示导入选项" }));
+    expect(screen.getByRole("menu", { name: "导入选项" })).toBeInTheDocument();
+    await user.click(search);
+    expect(screen.queryByRole("menu", { name: "导入选项" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "添加标签" }));
+    expect(screen.getByRole("textbox", { name: "新标签名称" })).toBeInTheDocument();
+    await user.click(search);
+    expect(screen.queryByRole("textbox", { name: "新标签名称" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "文件夹操作 文档" }));
+    expect(screen.getByRole("menu", { name: "文件夹操作 文档" })).toBeInTheDocument();
+    await user.click(search);
+    expect(screen.queryByRole("menu", { name: "文件夹操作 文档" })).not.toBeInTheDocument();
+
+    const card = screen.getAllByText("DSC_0876.jpg")[0].closest(".asset-card")!;
+    fireEvent.contextMenu(card, { clientX: 240, clientY: 180 });
+    expect(screen.getByRole("menu", { name: "资源操作" })).toBeInTheDocument();
+    await user.click(search);
+    expect(screen.queryByRole("menu", { name: "资源操作" })).not.toBeInTheDocument();
   });
 
   it("moves assets to trash from a red context-menu action", async () => {
@@ -87,7 +177,7 @@ describe("Libr desktop shell", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "文件夹操作 文档" }));
-    await user.click(within(screen.getByRole("menu", { name: "文件夹操作 文档" })).getByRole("menuitem", { name: "加密文件夹" }));
+    await user.click(within(screen.getByRole("menu", { name: "文件夹操作 文档" })).getByRole("menuitem", { name: "加密" }));
     const encryptDialog = screen.getByRole("dialog", { name: "加密文件夹" });
     await user.type(within(encryptDialog).getByLabelText("设置 8 位密码"), "12345678");
     await user.type(within(encryptDialog).getByLabelText("再次输入密码"), "12345678");
@@ -116,12 +206,29 @@ describe("Libr desktop shell", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole("button", { name: "应用设置" }));
-    await user.click(screen.getByRole("button", { name: /检查更新/ }));
+    await user.click(within(screen.getByRole("menu", { name: "应用操作" })).getByRole("menuitem", { name: /检查更新/ }));
     const dialog = screen.getByRole("dialog", { name: "应用更新" });
     expect(within(dialog).getByText("正在检查更新")).toBeInTheDocument();
     expect(await within(dialog).findByText("Libr 已是最新版本")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "完成" }));
     expect(screen.queryByRole("dialog", { name: "应用更新" })).not.toBeInTheDocument();
+  });
+
+  it("toggles dark mode and remembers the preference", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem("libr:theme");
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "应用设置" }));
+    const appMenu = screen.getByRole("menu", { name: "应用操作" });
+    await user.click(within(appMenu).getByRole("menuitem", { name: "深色模式" }));
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+    expect(window.localStorage.getItem("libr:theme")).toBe("dark");
+    expect(within(appMenu).getByRole("menuitem", { name: "浅色模式" })).toHaveAttribute("aria-pressed", "true");
+
+    window.localStorage.removeItem("libr:theme");
   });
 
   it("derives sidebar counts from live asset state", async () => {

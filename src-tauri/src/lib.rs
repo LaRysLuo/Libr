@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod error;
+mod lan_share;
 mod models;
 mod preferences;
 mod protocol;
@@ -15,6 +16,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state)
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -71,6 +73,7 @@ pub fn run() {
             commands::asset_restore,
             commands::asset_purge,
             commands::asset_export,
+            commands::asset_prepare_drag,
             commands::asset_open_external,
             commands::folder_list,
             commands::folder_assign_assets,
@@ -87,6 +90,9 @@ pub fn run() {
             commands::smart_folder_list,
             commands::smart_folder_upsert,
             commands::smart_folder_delete,
+            commands::lan_share_start,
+            commands::lan_share_stop,
+            commands::lan_share_status,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Libr");

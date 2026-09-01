@@ -12,12 +12,19 @@ use crate::{
     db,
     error::{LibrError, LibrResult},
     models::{
-        Asset, AssetPatch, FailedImport, Folder, ImportResult, JobProgress, LibraryInfo,
-        SearchQuery, SmartFolder, Tag,
+        Asset, AssetPatch, FailedImport, Folder, ImportResult, JobProgress, LanShareInfo,
+        LibraryInfo, SearchQuery, SmartFolder, Tag,
     },
     preferences,
     state::AppState,
 };
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedAssetDrag {
+    paths: Vec<String>,
+    icon_path: String,
+}
 
 fn remember_library(app: &AppHandle, path: &Path) {
     let result = app
@@ -56,6 +63,18 @@ fn collect_files(paths: &[String]) -> Vec<PathBuf> {
     files
 }
 
+fn is_same_file(left: &Path, right: &Path) -> LibrResult<bool> {
+    Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
+}
+
+fn delete_import_source(path: &Path, library_path: &Path) -> LibrResult<()> {
+    if is_same_file(path, library_path)? {
+        return Err(LibrError::Other("不能删除当前正在使用的资源库文件".into()));
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
 fn authorize_asset(state: &AppState, asset: &mut Asset) {
     asset.stream_token = Some(state.stream_tokens.lock().token_for(&asset.id));
 }
@@ -85,6 +104,7 @@ pub fn library_create(
     path: String,
     name: String,
 ) -> LibrResult<LibraryInfo> {
+    state.stop_lan_share();
     let session = db::create_library(Path::new(&path), &name)?;
     let info = db::library_info(&session)?;
     let library_path = session.path.clone();
@@ -101,6 +121,7 @@ pub fn library_open(
     state: State<'_, AppState>,
     path: String,
 ) -> LibrResult<LibraryInfo> {
+    state.stop_lan_share();
     let session = db::open_library(Path::new(&path))?;
     let info = db::library_info(&session)?;
     let library_path = session.path.clone();
@@ -113,6 +134,7 @@ pub fn library_open(
 
 #[tauri::command]
 pub fn library_close(state: State<'_, AppState>) {
+    state.stop_lan_share();
     *state.session.lock() = None;
     state.stream_tokens.lock().clear();
     state.unlocked_folders.lock().clear();
@@ -139,6 +161,7 @@ pub fn library_integrity(state: State<'_, AppState>) -> LibrResult<Vec<String>> 
 
 #[tauri::command]
 pub fn library_compact(state: State<'_, AppState>) -> LibrResult<LibraryInfo> {
+    state.stop_lan_share();
     let mut guard = state.session.lock();
     let session = guard.take().ok_or(LibrError::NoLibrary)?;
     if session.read_only {
@@ -184,6 +207,32 @@ pub fn library_compact(state: State<'_, AppState>) -> LibrResult<LibraryInfo> {
 }
 
 #[tauri::command]
+pub fn lan_share_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder_id: String,
+    allow_editing: bool,
+) -> LibrResult<LanShareInfo> {
+    crate::lan_share::start(app, state.inner().clone(), folder_id, allow_editing)
+}
+
+#[tauri::command]
+pub fn lan_share_stop(state: State<'_, AppState>) -> LanShareInfo {
+    state.stop_lan_share();
+    LanShareInfo::default()
+}
+
+#[tauri::command]
+pub fn lan_share_status(state: State<'_, AppState>) -> LanShareInfo {
+    state
+        .lan_share
+        .lock()
+        .as_ref()
+        .map(|runtime| runtime.info.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 pub fn asset_list(state: State<'_, AppState>, query: SearchQuery) -> LibrResult<Vec<Asset>> {
     let guard = state.session.lock();
     let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
@@ -205,23 +254,42 @@ pub async fn asset_import(
     state: State<'_, AppState>,
     paths: Vec<String>,
     folder_id: Option<String>,
+    delete_originals: bool,
 ) -> LibrResult<ImportResult> {
     if let Some(folder_id) = folder_id.as_deref() {
         let guard = state.session.lock();
         let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
         ensure_folder_accessible(&blocked_folder_ids(state.inner(), session)?, folder_id)?;
     }
+    let library_path = {
+        let guard = state.session.lock();
+        guard.as_ref().ok_or(LibrError::NoLibrary)?.path.clone()
+    };
     let job_id = Uuid::new_v4().to_string();
-    let files = collect_files(&paths);
-    let total = files.len();
+    emit_progress(
+        &app,
+        JobProgress {
+            job_id: job_id.clone(),
+            kind: "import".into(),
+            completed: 0,
+            total: 0,
+            current_item: None,
+            phase: "queued".into(),
+            message: Some("正在扫描待导入文件…".into()),
+        },
+    );
     let shared_state = state.inner().clone();
     let job_id_for_worker = job_id.clone();
     let app_for_worker = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let files = collect_files(&paths);
+        let total = files.len();
         let mut imported = Vec::new();
         let mut duplicates = 0usize;
         let mut failed = Vec::new();
+        let mut deleted_originals = 0usize;
+        let mut source_delete_failures = Vec::new();
         for (index, path) in files.iter().enumerate() {
             if shared_state
                 .cancelled_jobs
@@ -254,6 +322,13 @@ pub async fn asset_import(
                     message: None,
                 },
             );
+            if delete_originals && matches!(is_same_file(path, &library_path), Ok(true)) {
+                failed.push(FailedImport {
+                    path: path.to_string_lossy().to_string(),
+                    message: "不能剪切导入当前正在使用的资源库文件".into(),
+                });
+                continue;
+            }
             let result = {
                 let mut guard = shared_state.session.lock();
                 let session = guard.as_mut().ok_or(LibrError::NoLibrary)?;
@@ -265,6 +340,15 @@ pub async fn asset_import(
                         duplicates += 1;
                     } else {
                         imported.push(result.asset);
+                        if delete_originals {
+                            match delete_import_source(path, &library_path) {
+                                Ok(()) => deleted_originals += 1,
+                                Err(error) => source_delete_failures.push(FailedImport {
+                                    path: path.to_string_lossy().to_string(),
+                                    message: error.to_string(),
+                                }),
+                            }
+                        }
                     }
                 }
                 Err(error) => failed.push(FailedImport {
@@ -291,6 +375,8 @@ pub async fn asset_import(
             imported,
             duplicates,
             failed,
+            deleted_originals,
+            source_delete_failures,
         })
     })
     .await
@@ -372,6 +458,94 @@ pub fn asset_export(
         &asset_ids,
         Path::new(&destination),
     )
+}
+
+fn safe_drag_filename(display_name: &str) -> String {
+    let filename = db::sanitize_filename(display_name.trim());
+    if filename == "." || filename == ".." {
+        "未命名文件".into()
+    } else {
+        filename
+    }
+}
+
+#[tauri::command]
+pub async fn asset_prepare_drag(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    asset_ids: Vec<String>,
+) -> LibrResult<PreparedAssetDrag> {
+    if asset_ids.is_empty() {
+        return Err(LibrError::Other("请先选择要拖拽的资源".into()));
+    }
+
+    let cache_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| LibrError::Other(error.to_string()))?
+        .join("drag");
+    let shared_state = state.inner().clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = shared_state.session.lock();
+        let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+        let blocked = blocked_folder_ids(&shared_state, session)?;
+        db::ensure_assets_accessible(session, &asset_ids, &blocked)?;
+
+        let library_cache = cache_root.join(db::library_info(session)?.id);
+        fs::create_dir_all(&library_cache)?;
+        let mut paths = Vec::with_capacity(asset_ids.len());
+
+        for asset_id in &asset_ids {
+            let asset = db::get_asset(session, asset_id)?;
+            let asset_cache = library_cache.join(asset_id);
+            fs::create_dir_all(&asset_cache)?;
+            let destination = asset_cache.join(safe_drag_filename(&asset.display_name));
+            let cached_size_matches = destination
+                .metadata()
+                .map(|metadata| metadata.len() == asset.byte_size as u64)
+                .unwrap_or(false);
+            if !cached_size_matches {
+                let temporary = asset_cache.join("materializing.part");
+                let mut target = fs::File::create(&temporary)?;
+                db::stream_asset_to_writer(session, asset_id, &mut target)?;
+                drop(target);
+                if destination.exists() {
+                    fs::remove_file(&destination)?;
+                }
+                fs::rename(temporary, &destination)?;
+            }
+            paths.push(destination.to_string_lossy().into_owned());
+        }
+
+        let first_asset_id = asset_ids
+            .first()
+            .ok_or_else(|| LibrError::Other("资源不存在".into()))?;
+        let preview_path = library_cache.join(format!("{first_asset_id}-drag-preview.jpg"));
+        let icon_path = if preview_path.exists() {
+            preview_path
+        } else {
+            let mut preview = fs::File::create(&preview_path)?;
+            if db::stream_asset_preview_to_writer(session, first_asset_id, &mut preview)? {
+                preview_path
+            } else {
+                drop(preview);
+                let fallback = library_cache.join("libr-drag-icon.png");
+                if !fallback.exists() {
+                    fs::write(&fallback, include_bytes!("../icons/128x128.png"))?;
+                }
+                let _ = fs::remove_file(&preview_path);
+                fallback
+            }
+        };
+
+        Ok(PreparedAssetDrag {
+            paths,
+            icon_path: icon_path.to_string_lossy().into_owned(),
+        })
+    })
+    .await
+    .map_err(|error| LibrError::Other(error.to_string()))?
 }
 
 #[tauri::command]
@@ -587,7 +761,7 @@ pub fn smart_folder_delete(state: State<'_, AppState>, id: String) -> LibrResult
 
 #[cfg(test)]
 mod tests {
-    use super::collect_files;
+    use super::{collect_files, delete_import_source, safe_drag_filename};
     use std::fs;
 
     #[test]
@@ -603,5 +777,29 @@ mod tests {
         let files = collect_files(&[temporary.path().to_string_lossy().into_owned()]);
 
         assert_eq!(files, vec![nested_file, root_file]);
+    }
+
+    #[test]
+    fn cut_import_deletes_regular_sources_but_preserves_the_open_library() {
+        let temporary = tempfile::tempdir().unwrap();
+        let library = temporary.path().join("library.libr");
+        let source = temporary.path().join("source.txt");
+        fs::write(&library, b"library").unwrap();
+        fs::write(&source, b"source").unwrap();
+
+        delete_import_source(&source, &library).unwrap();
+        assert!(!source.exists());
+
+        let error = delete_import_source(&library, &library).unwrap_err();
+        assert!(error.to_string().contains("不能删除"));
+        assert!(library.exists());
+    }
+
+    #[test]
+    fn makes_drag_cache_filenames_safe() {
+        assert_eq!(safe_drag_filename("design/final.psd"), "design_final.psd");
+        assert_eq!(safe_drag_filename("design:final.psd"), "design_final.psd");
+        assert_eq!(safe_drag_filename(".."), "未命名文件");
+        assert_eq!(safe_drag_filename("   "), "未命名文件");
     }
 }

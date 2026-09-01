@@ -1,11 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use parking_lot::Mutex;
 
-use crate::db::LibrarySession;
+use crate::{db::LibrarySession, models::LanShareInfo};
+
+pub struct LanShareRuntime {
+    pub stop: Arc<AtomicBool>,
+    pub info: LanShareInfo,
+}
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -13,6 +21,15 @@ pub struct AppState {
     pub cancelled_jobs: Arc<Mutex<HashSet<String>>>,
     pub stream_tokens: Arc<Mutex<StreamTokenStore>>,
     pub unlocked_folders: Arc<Mutex<HashSet<String>>>,
+    pub lan_share: Arc<Mutex<Option<LanShareRuntime>>>,
+}
+
+impl AppState {
+    pub fn stop_lan_share(&self) -> Option<LanShareInfo> {
+        let runtime = self.lan_share.lock().take()?;
+        runtime.stop.store(true, Ordering::Release);
+        Some(runtime.info)
+    }
 }
 
 #[derive(Default)]

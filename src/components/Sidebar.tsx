@@ -9,6 +9,7 @@ import {
   Heart,
   Inbox,
   Library,
+  Globe2,
   LockKeyhole,
   LockKeyholeOpen,
   MoreHorizontal,
@@ -18,9 +19,10 @@ import {
   Tag,
   Trash2,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import type { Folder, NavigationCounts, SmartFolder } from "../types";
 import type { NavigationScope } from "../hooks/useLibraryController";
+import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import { hasDraggedAssets, readDraggedAssetIds } from "../lib/drag";
 
 interface SidebarProps {
@@ -31,6 +33,8 @@ interface SidebarProps {
   onScope: (scope: NavigationScope) => void;
   onOpenFolder: (folder: Folder) => void;
   onFolderSecurity: (folder: Folder, action: "encrypt" | "unlock" | "lock" | "remove") => void;
+  onShareFolder: (folder: Folder) => void;
+  sharedFolderId?: string | null;
   onCreateFolder: (name: string) => Promise<void> | void;
   onCreateSmartFolder: (name: string) => Promise<void> | void;
   onAssignAssets: (assetIds: string[], folderId: string) => Promise<void> | void;
@@ -86,7 +90,7 @@ function InlineCreate({ placeholder, onCancel, onCreate }: { placeholder: string
   return <form className="sidebar-inline-create" onSubmit={(event) => { event.preventDefault(); if (value.trim()) void Promise.resolve(onCreate(value)).then(onCancel); }}><input autoFocus aria-label={placeholder} placeholder={placeholder} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") onCancel(); }} /><button type="submit" disabled={!value.trim()}>添加</button></form>;
 }
 
-export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenFolder, onFolderSecurity, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
+export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenFolder, onFolderSecurity, onShareFolder, sharedFolderId, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [creating, setCreating] = useState<"folder" | "smart" | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
@@ -141,21 +145,12 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenF
     setFolderMenu({ folderId, x: event.clientX || rect.right, y: event.clientY || rect.bottom });
   };
 
-  useEffect(() => {
-    if (!folderMenu) return;
-    const close = (event: MouseEvent) => {
-      if (!folderMenuRef.current?.contains(event.target as Node)) setFolderMenu(null);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFolderMenu(null);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [folderMenu]);
+  useDismissibleLayer({
+    open: Boolean(folderMenu),
+    layerRef: folderMenuRef,
+    onDismiss: () => setFolderMenu(null),
+    closeOnScroll: true,
+  });
 
   const activeMenuFolder = folderMenu ? folders.find((folder) => folder.id === folderMenu.folderId) : undefined;
   const lockOwner = activeMenuFolder?.lockOwnerId ? folders.find((folder) => folder.id === activeMenuFolder.lockOwnerId) : activeMenuFolder;
@@ -237,8 +232,19 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenF
           className="folder-context-menu"
           role="menu"
           aria-label={`文件夹操作 ${activeMenuFolder.name}`}
-          style={{ left: Math.max(8, Math.min(folderMenu.x, window.innerWidth - 190)), top: Math.max(8, Math.min(folderMenu.y, window.innerHeight - 128)) }}
+          style={{ left: Math.max(8, Math.min(folderMenu.x, window.innerWidth - 190)), top: Math.max(8, Math.min(folderMenu.y, window.innerHeight - 180)) }}
         >
+          <button
+            type="button"
+            role="menuitem"
+            disabled={(activeMenuFolder.isLocked || activeMenuFolder.isEncrypted) && sharedFolderId !== activeMenuFolder.id}
+            title={activeMenuFolder.isLocked || activeMenuFolder.isEncrypted ? "加密文件夹不能通过局域网共享" : undefined}
+            onClick={() => { setFolderMenu(null); onShareFolder(activeMenuFolder); }}
+          >
+            <Globe2 size={14} />{sharedFolderId === activeMenuFolder.id ? "管理局域网共享" : "局域网共享"}
+            {sharedFolderId === activeMenuFolder.id ? <span className="menu-live-dot" aria-label="正在共享" /> : null}
+          </button>
+          <div className="menu-divider" role="separator" />
           {activeMenuFolder.isLocked && lockOwner ? (
             <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(lockOwner, "unlock"); }}><LockKeyholeOpen size={14} />解锁{lockOwner.id === activeMenuFolder.id ? "文件夹" : `“${lockOwner.name}”`}</button>
           ) : activeMenuFolder.isEncrypted ? (
@@ -247,7 +253,7 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenF
               <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(activeMenuFolder, "remove"); }}><ShieldOff size={14} />取消加密</button>
             </>
           ) : (
-            <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(activeMenuFolder, "encrypt"); }}><LockKeyhole size={14} />加密文件夹</button>
+            <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(activeMenuFolder, "encrypt"); }}><LockKeyhole size={14} />加密</button>
           )}
         </div>
       ) : null}

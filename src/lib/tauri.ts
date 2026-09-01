@@ -4,6 +4,7 @@ import type {
   Folder,
   ImportResult,
   LibraryInfo,
+  LanShareInfo,
   SearchQuery,
   SmartFolder,
   Tag,
@@ -34,8 +35,8 @@ export const libraryApi = {
 
 export const assetApi = {
   list: (query: SearchQuery) => call<Asset[]>("asset_list", { query }),
-  import: (paths: string[], folderId?: string) =>
-    call<ImportResult>("asset_import", { paths, folderId: folderId ?? null }),
+  import: (paths: string[], folderId?: string, deleteOriginals = false) =>
+    call<ImportResult>("asset_import", { paths, folderId: folderId ?? null, deleteOriginals }),
   cancelImport: (jobId: string) => call<void>("asset_cancel_import", { jobId }),
   update: (assetId: string, patch: AssetPatch) => call<Asset>("asset_update", { assetId, patch }),
   trash: (assetIds: string[]) => call<void>("asset_trash", { assetIds }),
@@ -43,6 +44,8 @@ export const assetApi = {
   purge: (assetIds: string[]) => call<void>("asset_purge", { assetIds }),
   export: (assetIds: string[], destination: string) =>
     call<void>("asset_export", { assetIds, destination }),
+  prepareDrag: (assetIds: string[]) =>
+    call<{ paths: string[]; iconPath: string }>("asset_prepare_drag", { assetIds }),
   openExternal: (assetId: string) => call<void>("asset_open_external", { assetId }),
 };
 
@@ -75,4 +78,11 @@ export const assetProtocolUrl = (assetId: string, preview = false) => {
   const path = `${preview ? "preview" : "asset"}/${encodeURIComponent(assetId)}`;
   const windows = navigator.userAgent.toLowerCase().includes("windows");
   return windows ? `http://libr.localhost/${path}` : `libr://localhost/${path}`;
+};
+
+export const lanShareApi = {
+  status: () => call<LanShareInfo>("lan_share_status"),
+  start: (folderId: string, allowEditing: boolean) =>
+    call<LanShareInfo>("lan_share_start", { folderId, allowEditing }),
+  stop: () => call<LanShareInfo>("lan_share_stop"),
 };

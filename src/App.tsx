@@ -1,19 +1,23 @@
-import { AlertCircle, CheckCircle2, Copy, Database, FilePlus2, FolderOpen, RefreshCw, Save, Settings, ShieldCheck, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertCircle, CheckCircle2, Copy, Database, FilePlus2, FolderOpen, Moon, RefreshCw, Save, Settings, ShieldCheck, Sun, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppHeader } from "./components/AppHeader";
 import { AssetGrid } from "./components/AssetGrid";
 import { FilterBar } from "./components/FilterBar";
 import { FocusPreview } from "./components/FocusPreview";
 import { FolderPasswordDialog, type FolderPasswordMode } from "./components/FolderPasswordDialog";
+import { ImportSettingsDialog, type ImportSettings } from "./components/ImportSettingsDialog";
 import { Inspector } from "./components/Inspector";
+import { LanShareDialog } from "./components/LanShareDialog";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useAppUpdater } from "./hooks/useAppUpdater";
+import { useDismissibleLayer } from "./hooks/useDismissibleLayer";
 import { useLibraryController } from "./hooks/useLibraryController";
-import { assetApi, isTauriRuntime, libraryApi } from "./lib/tauri";
-import type { Asset, Folder } from "./types";
+import { shouldIgnoreNativeAssetDrop } from "./lib/drag";
+import { assetApi, isTauriRuntime, lanShareApi, libraryApi } from "./lib/tauri";
+import type { Asset, Folder, LanShareInfo } from "./types";
 
 interface ToastState {
   kind: "success" | "error" | "info";
@@ -24,6 +28,27 @@ interface FolderPasswordState {
   folder: Folder;
   mode: FolderPasswordMode;
   openFolderId?: string;
+}
+
+type Theme = "light" | "dark";
+
+const THEME_STORAGE_KEY = "libr:theme";
+const IMPORT_SETTINGS_STORAGE_KEY = "libr:import-settings";
+const inactiveLanShare: LanShareInfo = { active: false };
+
+function getInitialTheme(): Theme {
+  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function getInitialImportSettings(): ImportSettings {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(IMPORT_SETTINGS_STORAGE_KEY) ?? "null") as Partial<ImportSettings> | null;
+    return { deleteOriginals: stored?.deleteOriginals === true };
+  } catch {
+    return { deleteOriginals: false };
+  }
 }
 
 async function chooseLibraryToOpen() {
@@ -47,9 +72,37 @@ function App() {
   const [focusAsset, setFocusAsset] = useState<Asset | null>(null);
   const [libraryMenuOpen, setLibraryMenuOpen] = useState(false);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const libraryMenuRef = useRef<HTMLDivElement>(null);
+  const libraryMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const appMenuRef = useRef<HTMLDivElement>(null);
+  const appMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [folderPassword, setFolderPassword] = useState<FolderPasswordState | null>(null);
+  const [lanShareFolderId, setLanShareFolderId] = useState<string | null>(null);
+  const [lanShareInfo, setLanShareInfo] = useState<LanShareInfo>(inactiveLanShare);
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [importSettings, setImportSettings] = useState<ImportSettings>(getInitialImportSettings);
+  const [importSettingsOpen, setImportSettingsOpen] = useState(false);
   const selectedBytes = useMemo(() => controller.selectedAssets.reduce((sum, item) => sum + item.byteSize, 0), [controller.selectedAssets]);
+
+  useDismissibleLayer({
+    open: libraryMenuOpen,
+    layerRef: libraryMenuRef,
+    triggerRef: libraryMenuTriggerRef,
+    onDismiss: () => setLibraryMenuOpen(false),
+  });
+  useDismissibleLayer({
+    open: appMenuOpen,
+    layerRef: appMenuRef,
+    triggerRef: appMenuTriggerRef,
+    onDismiss: () => setAppMenuOpen(false),
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!toast) return;
@@ -65,6 +118,7 @@ function App() {
         if (event.payload.type === "drop") {
           const paths = event.payload.paths.filter(Boolean);
           if (paths.length === 0) return;
+          if (shouldIgnoreNativeAssetDrop(paths)) return;
           void controller.importPaths(paths).then((result) => {
             setToast({ kind: "success", message: `已导入 ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项` });
           }).catch((reason) => setToast({ kind: "error", message: String(reason) }));
@@ -93,10 +147,13 @@ function App() {
   };
 
   const importAssets = async (source: "files" | "folder") => {
+    const { deleteOriginals } = importSettings;
     if (!isTauriRuntime()) {
       setToast({
         kind: "success",
-        message: source === "folder"
+        message: deleteOriginals
+          ? "剪切导入入口工作正常；桌面版只会删除新导入成功的原文件，重复项会保留。"
+          : source === "folder"
           ? "文件夹导入入口工作正常；桌面版会导入所选文件夹及其所有子文件夹中的文件。"
           : "导入入口工作正常；桌面版会流式写入当前资源库。",
       });
@@ -106,9 +163,24 @@ function App() {
     const paths = await open({ multiple: source === "files", directory: source === "folder" });
     if (!paths) return;
     const list = typeof paths === "string" ? [paths] : paths;
-    const result = await controller.importPaths(list);
+    const result = await controller.importPaths(list, undefined, deleteOriginals);
+    if (deleteOriginals) {
+      const deleteFailures = result.sourceDeleteFailures.length;
+      setToast({
+        kind: deleteFailures ? "info" : "success",
+        message: `已剪切导入 ${result.imported.length} 项，删除 ${result.deletedOriginals} 个原文件${result.duplicates ? `，保留 ${result.duplicates} 个重复项` : ""}${deleteFailures ? `，${deleteFailures} 个原文件无法删除` : ""}`,
+      });
+      return;
+    }
     setToast({ kind: "success", message: `已导入 ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项` });
   };
+
+  const saveImportSettings = useCallback((settings: ImportSettings) => {
+    setImportSettings(settings);
+    window.localStorage.setItem(IMPORT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    setImportSettingsOpen(false);
+    setToast({ kind: "success", message: settings.deleteOriginals ? "导入已设为剪切模式" : "导入已设为复制模式" });
+  }, []);
 
   const saveCopy = async () => {
     if (!isTauriRuntime()) {
@@ -119,6 +191,42 @@ function App() {
     if (!path) return;
     await libraryApi.saveCopy(path);
     setToast({ kind: "success", message: "资源库副本已保存" });
+  };
+
+  const openLanShare = useCallback(async (folder: Folder) => {
+    setLanShareFolderId(folder.id);
+    if (!isTauriRuntime()) return;
+    try {
+      setLanShareInfo(await lanShareApi.status());
+    } catch (reason) {
+      setToast({ kind: "error", message: String(reason) });
+    }
+  }, []);
+
+  const startLanShare = async (folderId: string, allowEditing: boolean) => {
+    if (!isTauriRuntime()) {
+      const folder = controller.folders.find((item) => item.id === folderId);
+      const demoInfo: LanShareInfo = {
+        active: true,
+        folderId,
+        folderName: folder?.name ?? "共享文件夹",
+        permission: allowEditing ? "manage" : "readOnly",
+        url: "http://192.168.1.23:41783/share/demo-access-token",
+        port: 41783,
+      };
+      setLanShareInfo(demoInfo);
+      return demoInfo;
+    }
+    const info = await lanShareApi.start(folderId, allowEditing);
+    setLanShareInfo(info);
+    setToast({ kind: "success", message: `已开始共享“${info.folderName ?? "文件夹"}”` });
+    return info;
+  };
+
+  const stopLanShare = async () => {
+    if (isTauriRuntime()) await lanShareApi.stop();
+    setLanShareInfo(inactiveLanShare);
+    setToast({ kind: "success", message: "局域网共享已停止" });
   };
 
   const openExternal = async (asset: Asset) => {
@@ -260,31 +368,48 @@ function App() {
         searchText={controller.searchText}
         sortBy={controller.sortBy}
         viewMode={viewMode}
+        deleteOriginals={importSettings.deleteOriginals}
         onSearch={controller.setSearchText}
         onImportFiles={() => void importAssets("files")}
         onImportFolder={() => void importAssets("folder")}
+        onImportSettings={() => setImportSettingsOpen(true)}
         onSort={controller.setSortBy}
         onViewMode={setViewMode}
         onToggleFilters={() => setFiltersExpanded((value) => !value)}
         onToggleSidebar={() => setSidebarVisible((value) => !value)}
         onLibraryMenu={() => { setAppMenuOpen(false); setLibraryMenuOpen((value) => !value); }}
         onAppMenu={() => { setLibraryMenuOpen(false); setAppMenuOpen((value) => !value); }}
+        libraryMenuOpen={libraryMenuOpen}
+        appMenuOpen={appMenuOpen}
+        libraryMenuTriggerRef={libraryMenuTriggerRef}
+        appMenuTriggerRef={appMenuTriggerRef}
       />
 
       {libraryMenuOpen ? (
-        <div className="library-menu">
-          <button type="button" onClick={() => { setLibraryMenuOpen(false); void createLibrary(); }}><FilePlus2 size={15} />新建资源库<kbd>⌘N</kbd></button>
-          <button type="button" onClick={() => { setLibraryMenuOpen(false); void openLibrary(); }}><FolderOpen size={15} />打开资源库<kbd>⌘O</kbd></button>
-          <button type="button" onClick={() => { setLibraryMenuOpen(false); void saveCopy(); }}><Copy size={15} />另存副本…</button>
-          <button type="button" onClick={() => void inspectIntegrity()}><ShieldCheck size={15} />检查资源库完整性</button>
-          <button type="button" onClick={() => void compactLibrary()} disabled={controller.activeJobs > 0}><Database size={15} />压缩资源库</button>
+        <div ref={libraryMenuRef} className="library-menu" role="menu" aria-label="资源库操作">
+          <button type="button" role="menuitem" onClick={() => { setLibraryMenuOpen(false); void createLibrary(); }}><FilePlus2 size={15} />新建资源库<kbd>⌘N</kbd></button>
+          <button type="button" role="menuitem" onClick={() => { setLibraryMenuOpen(false); void openLibrary(); }}><FolderOpen size={15} />打开资源库<kbd>⌘O</kbd></button>
+          <button type="button" role="menuitem" onClick={() => { setLibraryMenuOpen(false); void saveCopy(); }}><Copy size={15} />另存副本…</button>
+          <button type="button" role="menuitem" onClick={() => void inspectIntegrity()}><ShieldCheck size={15} />检查资源库完整性</button>
+          <button type="button" role="menuitem" onClick={() => void compactLibrary()} disabled={controller.activeJobs > 0}><Database size={15} />压缩资源库</button>
         </div>
       ) : null}
 
       {appMenuOpen ? (
-        <div className="library-menu app-menu">
-          <button type="button" onClick={() => { setAppMenuOpen(false); void updater.checkForUpdates(true); }}><RefreshCw size={15} />检查更新…</button>
-          <button type="button" disabled title="偏好设置将在后续版本开放"><Settings size={15} />偏好设置<kbd>⌘,</kbd></button>
+        <div ref={appMenuRef} className="library-menu app-menu" role="menu" aria-label="应用操作">
+          <button
+            type="button"
+            role="menuitem"
+            aria-pressed={theme === "dark"}
+            onClick={() => setTheme((currentTheme) => currentTheme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+            {theme === "dark" ? "浅色模式" : "深色模式"}
+            <span className={`theme-switch ${theme === "dark" ? "is-on" : ""}`} aria-hidden="true"><span /></span>
+          </button>
+          <div className="menu-divider" role="separator" />
+          <button type="button" role="menuitem" onClick={() => { setAppMenuOpen(false); void updater.checkForUpdates(true); }}><RefreshCw size={15} />检查更新…</button>
+          <button type="button" role="menuitem" disabled title="偏好设置将在后续版本开放"><Settings size={15} />偏好设置<kbd>⌘,</kbd></button>
         </div>
       ) : null}
 
@@ -298,6 +423,8 @@ function App() {
             onScope={controller.setScope}
             onOpenFolder={openFolder}
             onFolderSecurity={handleFolderSecurity}
+            onShareFolder={openLanShare}
+            sharedFolderId={lanShareInfo.active ? lanShareInfo.folderId : null}
             onCreateFolder={controller.createFolder}
             onCreateSmartFolder={controller.createSmartFolder}
             onAssignAssets={assignAssetsToFolder}
@@ -337,8 +464,10 @@ function App() {
             onSelect={controller.selectAsset}
             onOpen={setFocusAsset}
             onToggleFavorite={(asset) => void controller.updateAsset(asset.id, { favorite: !asset.favorite })}
+            onRename={(asset, displayName) => controller.updateAsset(asset.id, { displayName })}
             onAssignAssets={assignAssetsToFolder}
             onDelete={deleteAssets}
+            onExternalDragError={(reason) => setToast({ kind: "error", message: `无法拖出资源：${String(reason)}` })}
           />
         </main>
 
@@ -398,6 +527,27 @@ function App() {
           mode={folderPassword.mode}
           onCancel={() => setFolderPassword(null)}
           onSubmit={submitFolderPassword}
+        />
+      ) : null}
+
+      {lanShareFolderId ? (
+        <LanShareDialog
+          key={lanShareFolderId}
+          folders={controller.folders}
+          libraryReadOnly={controller.library.readOnly}
+          info={lanShareInfo}
+          initialFolderId={lanShareFolderId}
+          onClose={() => setLanShareFolderId(null)}
+          onStart={startLanShare}
+          onStop={stopLanShare}
+        />
+      ) : null}
+
+      {importSettingsOpen ? (
+        <ImportSettingsDialog
+          settings={importSettings}
+          onCancel={() => setImportSettingsOpen(false)}
+          onSave={saveImportSettings}
         />
       ) : null}
 

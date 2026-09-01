@@ -171,6 +171,8 @@ pub struct ImportResult {
     pub imported: Vec<Asset>,
     pub duplicates: usize,
     pub failed: Vec<FailedImport>,
+    pub deleted_originals: usize,
+    pub source_delete_failures: Vec<FailedImport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,4 +185,28 @@ pub struct JobProgress {
     pub current_item: Option<String>,
     pub phase: String,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanShareInfo {
+    pub active: bool,
+    pub folder_id: Option<String>,
+    pub folder_name: Option<String>,
+    pub permission: Option<String>,
+    pub url: Option<String>,
+    pub port: Option<u16>,
+}
+
+impl Default for LanShareInfo {
+    fn default() -> Self {
+        Self {
+            active: false,
+            folder_id: None,
+            folder_name: None,
+            permission: None,
+            url: None,
+            port: None,
+        }
+    }
 }

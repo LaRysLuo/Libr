@@ -10,8 +10,11 @@ import {
   Menu,
   Search,
   Settings,
+  Settings2,
+  Scissors,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent, type RefObject } from "react";
+import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import type { LibraryInfo, SearchQuery } from "../types";
 import { IconButton } from "./IconButton";
 
@@ -20,15 +23,21 @@ interface AppHeaderProps {
   searchText: string;
   sortBy: SearchQuery["sortBy"];
   viewMode: "grid" | "list";
+  deleteOriginals: boolean;
   onSearch: (value: string) => void;
   onImportFiles: () => void;
   onImportFolder: () => void;
+  onImportSettings: () => void;
   onSort: (value: SearchQuery["sortBy"]) => void;
   onViewMode: (value: "grid" | "list") => void;
   onToggleFilters: () => void;
   onToggleSidebar: () => void;
   onLibraryMenu: () => void;
   onAppMenu: () => void;
+  libraryMenuOpen: boolean;
+  appMenuOpen: boolean;
+  libraryMenuTriggerRef: RefObject<HTMLButtonElement | null>;
+  appMenuTriggerRef: RefObject<HTMLButtonElement | null>;
 }
 
 export function AppHeader({
@@ -36,35 +45,31 @@ export function AppHeader({
   searchText,
   sortBy,
   viewMode,
+  deleteOriginals,
   onSearch,
   onImportFiles,
   onImportFolder,
+  onImportSettings,
   onSort,
   onViewMode,
   onToggleFilters,
   onToggleSidebar,
   onLibraryMenu,
   onAppMenu,
+  libraryMenuOpen,
+  appMenuOpen,
+  libraryMenuTriggerRef,
+  appMenuTriggerRef,
 }: AppHeaderProps) {
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const importControlRef = useRef<HTMLDivElement>(null);
   const handleSort = (event: ChangeEvent<HTMLSelectElement>) => onSort(event.target.value as SearchQuery["sortBy"]);
 
-  useEffect(() => {
-    if (!importMenuOpen) return;
-    const closeOnOutsideClick = (event: MouseEvent) => {
-      if (!importControlRef.current?.contains(event.target as Node)) setImportMenuOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setImportMenuOpen(false);
-    };
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [importMenuOpen]);
+  useDismissibleLayer({
+    open: importMenuOpen,
+    layerRef: importControlRef,
+    onDismiss: () => setImportMenuOpen(false),
+  });
 
   const chooseImport = (action: () => void) => {
     setImportMenuOpen(false);
@@ -77,7 +82,14 @@ export function AppHeader({
         <IconButton label="显示或隐藏侧边栏" onClick={onToggleSidebar}><Menu size={18} /></IconButton>
         <strong className="product-title" data-tauri-drag-region>资源库</strong>
         <span className="header-divider" aria-hidden="true" />
-        <button type="button" className="library-switcher" onClick={onLibraryMenu}>
+        <button
+          ref={libraryMenuTriggerRef}
+          type="button"
+          className="library-switcher"
+          aria-haspopup="menu"
+          aria-expanded={libraryMenuOpen}
+          onClick={onLibraryMenu}
+        >
           <span>{library.name}.libr</span>
           <ChevronDown size={14} />
         </button>
@@ -96,9 +108,9 @@ export function AppHeader({
 
       <div className="header-actions">
         <div className="import-control" ref={importControlRef}>
-          <button type="button" className="primary-button import-button" aria-label="导入文件" onClick={onImportFiles}>
-            <Import size={16} />
-            <span>导入</span>
+          <button type="button" className="primary-button import-button" aria-label={deleteOriginals ? "剪切导入文件" : "导入文件"} onClick={() => chooseImport(onImportFiles)}>
+            {deleteOriginals ? <Scissors size={16} /> : <Import size={16} />}
+            <span>{deleteOriginals ? "剪切导入" : "导入"}</span>
           </button>
           <button
             type="button"
@@ -120,6 +132,11 @@ export function AppHeader({
                 <FolderOpen size={16} />
                 <span className="import-menu-copy"><strong>导入文件夹…</strong><small>包含所有子文件夹中的文件</small></span>
               </button>
+              <div className="menu-divider" role="separator" />
+              <button type="button" role="menuitem" onClick={() => chooseImport(onImportSettings)}>
+                <Settings2 size={16} />
+                <span className="import-menu-copy"><strong>导入配置…</strong><small>{deleteOriginals ? "当前：导入后删除原文件" : "当前：保留原文件"}</small></span>
+              </button>
             </div>
           ) : null}
         </div>
@@ -140,7 +157,13 @@ export function AppHeader({
           <ChevronDown size={13} aria-hidden="true" />
         </label>
         <IconButton label="显示筛选器" onClick={onToggleFilters}><Filter size={16} /></IconButton>
-        <IconButton label="应用设置" onClick={onAppMenu}><Settings size={16} /></IconButton>
+        <IconButton
+          ref={appMenuTriggerRef}
+          label="应用设置"
+          aria-haspopup="menu"
+          aria-expanded={appMenuOpen}
+          onClick={onAppMenu}
+        ><Settings size={16} /></IconButton>
       </div>
     </header>
   );

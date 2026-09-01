@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   label: string;
@@ -6,9 +6,10 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   selected?: boolean;
 }
 
-export function IconButton({ label, children, selected = false, className = "", ...props }: IconButtonProps) {
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton({ label, children, selected = false, className = "", ...props }, ref) {
   return (
     <button
+      ref={ref}
       type="button"
       className={`icon-button ${selected ? "is-selected" : ""} ${className}`}
       aria-label={label}
@@ -18,4 +19,4 @@ export function IconButton({ label, children, selected = false, className = "", 
       {children}
     </button>
   );
-}
+});

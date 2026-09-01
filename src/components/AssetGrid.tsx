@@ -1,7 +1,14 @@
 import { Check, ListChecks, Pause, Play, Star, Trash2 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Asset } from "../types";
-import { ASSET_DRAG_TYPE } from "../lib/drag";
+import {
+  ASSET_DRAG_TYPE,
+  folderIdAtScreenPosition,
+  prepareNativeAssetDrag,
+  startNativeAssetDrag,
+} from "../lib/drag";
+import { isTauriRuntime } from "../lib/tauri";
+import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import { AssetArtwork } from "./AssetArtwork";
 
 interface AssetGridProps {
@@ -13,8 +20,10 @@ interface AssetGridProps {
   onSelect: (id: string, additive?: boolean, range?: boolean) => void;
   onOpen: (asset: Asset) => void;
   onToggleFavorite: (asset: Asset) => void;
+  onRename: (asset: Asset, displayName: string) => Promise<void> | void;
   onAssignAssets: (assetIds: string[], folderId: string) => Promise<void> | void;
   onDelete: (assets: Asset[]) => void;
+  onExternalDragError?: (reason: unknown) => void;
 }
 
 const formatDuration = (durationMs?: number | null) => {
@@ -117,6 +126,9 @@ interface PointerDragState {
   source: HTMLElement;
   preview: HTMLElement | null;
   dropTarget: HTMLElement | null;
+  nativeDrag: boolean;
+  nativeDragStarted: boolean;
+  preparation: ReturnType<typeof prepareNativeAssetDrag> | null;
 }
 
 const AssetCard = memo(function AssetCard({
@@ -125,6 +137,7 @@ const AssetCard = memo(function AssetCard({
   onSelect,
   onOpen,
   onToggleFavorite,
+  onRename,
   onDragStart,
   onDragEnd,
   onPointerDown,
@@ -135,12 +148,46 @@ const AssetCard = memo(function AssetCard({
   onSelect: (event: React.MouseEvent) => void;
   onOpen: () => void;
   onToggleFavorite: (event: React.MouseEvent) => void;
+  onRename: (displayName: string) => Promise<void> | void;
   onDragStart: (event: React.DragEvent<HTMLElement>) => void;
   onDragEnd: (event: React.DragEvent<HTMLElement>) => void;
   onPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
   onContextMenu: (event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => void;
 }) {
   const duration = formatDuration(asset.durationMs);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(asset.displayName);
+
+  const startRenaming = useCallback(() => {
+    setNameDraft(asset.displayName);
+    setRenaming(true);
+  }, [asset.displayName]);
+
+  const finishRenaming = useCallback(() => {
+    const nextName = nameDraft.trim();
+    setRenaming(false);
+    if (!nextName || nextName === asset.displayName) {
+      setNameDraft(asset.displayName);
+      return;
+    }
+    void onRename(nextName);
+  }, [asset.displayName, nameDraft, onRename]);
+
+  const cancelRenaming = useCallback(() => {
+    setNameDraft(asset.displayName);
+    setRenaming(false);
+  }, [asset.displayName]);
+
+  useEffect(() => {
+    if (!renaming) return;
+    const input = renameInputRef.current;
+    if (!input) return;
+    input.focus();
+    const extensionSeparator = asset.displayName.lastIndexOf(".");
+    input.setSelectionRange(0, extensionSeparator > 0 ? extensionSeparator : asset.displayName.length);
+  }, [asset.displayName, renaming]);
+
   return (
     <article
       className={`asset-card ${selected ? "is-selected" : ""}`}
@@ -155,6 +202,11 @@ const AssetCard = memo(function AssetCard({
       onContextMenu={onContextMenu}
       onDoubleClick={onOpen}
       onKeyDown={(event) => {
+        if (event.key === "F2") {
+          event.preventDefault();
+          startRenaming();
+          return;
+        }
         if (event.key === "Enter") onOpen();
         if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
           event.preventDefault();
@@ -170,7 +222,46 @@ const AssetCard = memo(function AssetCard({
         {duration ? <span className="duration-badge">{asset.kind === "video" ? <Play size={10} fill="currentColor" /> : null}{duration}</span> : null}
       </div>
       <div className="asset-caption">
-        <span className="asset-name" title={asset.displayName}>{asset.displayName}</span>
+        {renaming ? (
+          <input
+            ref={renameInputRef}
+            className="asset-name-input"
+            value={nameDraft}
+            aria-label={`重命名 ${asset.displayName}`}
+            spellCheck={false}
+            onChange={(event) => setNameDraft(event.target.value)}
+            onBlur={finishRenaming}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === "Enter") {
+                event.preventDefault();
+                finishRenaming();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelRenaming();
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className="asset-name"
+            title={`${asset.displayName}（点击重命名）`}
+            aria-label={`重命名 ${asset.displayName}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(event);
+              startRenaming();
+            }}
+            onDoubleClick={(event) => event.stopPropagation()}
+          >
+            {asset.displayName}
+          </button>
+        )}
         <span className="asset-extension">{asset.extension}</span>
       </div>
     </article>
@@ -183,7 +274,7 @@ interface AssetContextMenuState {
   y: number;
 }
 
-export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loading, onSelect, onOpen, onToggleFavorite, onAssignAssets, onDelete }: AssetGridProps) {
+export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loading, onSelect, onOpen, onToggleFavorite, onRename, onAssignAssets, onDelete, onExternalDragError }: AssetGridProps) {
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const suppressClickRef = useRef(false);
   const contextMenuRef = useRef<HTMLDivElement>(null);
@@ -227,8 +318,9 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
   }, [onAssignAssets]);
 
   const handlePointerDown = useCallback((assetId: string, event: React.PointerEvent<HTMLElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button, audio")) return;
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, audio")) return;
     const assetIds = selectedIds.has(assetId) ? [...selectedIds] : [assetId];
+    const nativeDrag = isTauriRuntime();
     pointerDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -238,15 +330,61 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
       source: event.currentTarget,
       preview: null,
       dropTarget: null,
+      nativeDrag,
+      nativeDragStarted: false,
+      preparation: nativeDrag ? prepareNativeAssetDrag(assetIds) : null,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }, [selectedIds]);
+
+  const beginNativeDrag = useCallback(async (state: PointerDragState) => {
+    try {
+      state.source.classList.add("is-preparing-drag");
+      const prepared = await state.preparation;
+      if (!prepared || pointerDragRef.current !== state) {
+        state.source.classList.remove("is-preparing-drag");
+        return;
+      }
+
+      suppressClickRef.current = true;
+      cleanupPointerDrag(false);
+      state.source.classList.remove("is-preparing-drag");
+      state.source.classList.add("is-dragging");
+      document.documentElement.classList.add("is-asset-dragging");
+
+      await startNativeAssetDrag(
+        prepared,
+        (position) => {
+          void folderIdAtScreenPosition(position).then((folderId) => {
+            if (folderId) void onAssignAssets(state.assetIds, folderId);
+          });
+        },
+        () => {
+          state.source.classList.remove("is-dragging", "is-preparing-drag");
+          document.documentElement.classList.remove("is-asset-dragging");
+        },
+      );
+    } catch (reason) {
+      state.source.classList.remove("is-dragging", "is-preparing-drag");
+      document.documentElement.classList.remove("is-asset-dragging");
+      if (pointerDragRef.current === state) cleanupPointerDrag(false);
+      onExternalDragError?.(reason);
+    }
+  }, [cleanupPointerDrag, onAssignAssets, onExternalDragError]);
 
   const handlePointerMove = useCallback((event: PointerEvent) => {
     const state = pointerDragRef.current;
     if (!state || state.pointerId !== event.pointerId) return;
     if (!state.preview && Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < 6) return;
     event.preventDefault();
+    if (state.nativeDrag) {
+      if (!state.nativeDragStarted) {
+        state.nativeDragStarted = true;
+        if (!selectedIds.has(state.assetId)) onSelect(state.assetId);
+        void beginNativeDrag(state);
+      }
+      return;
+    }
     if (!state.preview) {
       if (!selectedIds.has(state.assetId)) onSelect(state.assetId);
       state.preview = createCompactDragPreview(state.source, state.assetIds.length) ?? null;
@@ -263,7 +401,7 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
       nextTarget?.classList.add("is-drop-target");
       state.dropTarget = nextTarget;
     }
-  }, [onSelect, selectedIds]);
+  }, [beginNativeDrag, onSelect, selectedIds]);
 
   const handlePointerUp = useCallback((event: PointerEvent) => {
     const state = pointerDragRef.current;
@@ -319,26 +457,14 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
   useEffect(() => {
     if (!contextMenu) return;
     contextMenuButtonRef.current?.focus();
-    const closeFromOutside = (event: PointerEvent) => {
-      if (!contextMenuRef.current?.contains(event.target as Node)) setContextMenu(null);
-    };
-    const closeFromKeyboard = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setContextMenu(null);
-    };
-    const close = () => setContextMenu(null);
-    window.addEventListener("pointerdown", closeFromOutside, true);
-    window.addEventListener("keydown", closeFromKeyboard);
-    window.addEventListener("blur", close);
-    window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
-    return () => {
-      window.removeEventListener("pointerdown", closeFromOutside, true);
-      window.removeEventListener("keydown", closeFromKeyboard);
-      window.removeEventListener("blur", close);
-      window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
-    };
   }, [contextMenu]);
+
+  useDismissibleLayer({
+    open: Boolean(contextMenu),
+    layerRef: contextMenuRef,
+    onDismiss: () => setContextMenu(null),
+    closeOnScroll: true,
+  });
 
   if (!loading && assets.length === 0) {
     return (
@@ -367,6 +493,7 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
             onSelect={(event) => handleSelect(asset.id, event)}
             onOpen={() => onOpen(asset)}
             onToggleFavorite={(event) => { event.stopPropagation(); onToggleFavorite(asset); }}
+            onRename={(displayName) => onRename(asset, displayName)}
             onDragStart={(event) => handleDragStart(asset.id, event)}
             onDragEnd={handleDragEnd}
             onPointerDown={(event) => handlePointerDown(asset.id, event)}

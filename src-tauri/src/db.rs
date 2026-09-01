@@ -1222,6 +1222,26 @@ pub fn stream_asset_to_writer(
     Ok(filename)
 }
 
+pub fn stream_asset_preview_to_writer(
+    session: &LibrarySession,
+    asset_id: &str,
+    mut writer: impl Write,
+) -> LibrResult<bool> {
+    let preview: Option<Vec<u8>> = session
+        .conn
+        .query_row(
+            "SELECT data FROM previews WHERE asset_id = ?1 AND kind = 'thumbnail'",
+            [asset_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(preview) = preview else {
+        return Ok(false);
+    };
+    writer.write_all(&preview)?;
+    Ok(true)
+}
+
 pub fn export_assets(
     session: &LibrarySession,
     asset_ids: &[String],
@@ -1376,7 +1396,7 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn sanitize_filename(value: &str) -> String {
+pub(crate) fn sanitize_filename(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|character| match character {
