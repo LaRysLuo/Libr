@@ -55,6 +55,13 @@ export const organizationApi = {
   updateFolder: (id: string, name: string, parentId?: string) =>
     call<Folder>("folder_update", { id, name, parentId: parentId ?? null }),
   deleteFolder: (id: string) => call<void>("folder_delete", { id }),
+  setFolderPassword: (id: string, password: string) =>
+    call<void>("folder_set_password", { id, password }),
+  unlockFolder: (id: string, password: string) =>
+    call<boolean>("folder_unlock", { id, password }),
+  lockFolder: (id: string) => call<void>("folder_lock", { id }),
+  clearFolderPassword: (id: string, password: string) =>
+    call<boolean>("folder_clear_password", { id, password }),
   tags: () => call<Tag[]>("tag_list"),
   createTag: (name: string, color?: string) => call<Tag>("tag_create", { name, color: color ?? null }),
   deleteTag: (id: string) => call<void>("tag_delete", { id }),

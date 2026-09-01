@@ -12,6 +12,7 @@ pub struct AppState {
     pub session: Arc<Mutex<Option<LibrarySession>>>,
     pub cancelled_jobs: Arc<Mutex<HashSet<String>>>,
     pub stream_tokens: Arc<Mutex<StreamTokenStore>>,
+    pub unlocked_folders: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Default)]

@@ -4,6 +4,7 @@ import { AppHeader } from "./components/AppHeader";
 import { AssetGrid } from "./components/AssetGrid";
 import { FilterBar } from "./components/FilterBar";
 import { FocusPreview } from "./components/FocusPreview";
+import { FolderPasswordDialog, type FolderPasswordMode } from "./components/FolderPasswordDialog";
 import { Inspector } from "./components/Inspector";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -12,11 +13,17 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { useLibraryController } from "./hooks/useLibraryController";
 import { assetApi, isTauriRuntime, libraryApi } from "./lib/tauri";
-import type { Asset } from "./types";
+import type { Asset, Folder } from "./types";
 
 interface ToastState {
   kind: "success" | "error" | "info";
   message: string;
+}
+
+interface FolderPasswordState {
+  folder: Folder;
+  mode: FolderPasswordMode;
+  openFolderId?: string;
 }
 
 async function chooseLibraryToOpen() {
@@ -41,6 +48,7 @@ function App() {
   const [libraryMenuOpen, setLibraryMenuOpen] = useState(false);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [folderPassword, setFolderPassword] = useState<FolderPasswordState | null>(null);
   const selectedBytes = useMemo(() => controller.selectedAssets.reduce((sum, item) => sum + item.byteSize, 0), [controller.selectedAssets]);
 
   useEffect(() => {
@@ -84,13 +92,18 @@ function App() {
     if (typeof path === "string") await controller.openLibrary(path);
   };
 
-  const importAssets = async () => {
+  const importAssets = async (source: "files" | "folder") => {
     if (!isTauriRuntime()) {
-      setToast({ kind: "success", message: "导入入口工作正常；桌面版会流式写入当前资源库。" });
+      setToast({
+        kind: "success",
+        message: source === "folder"
+          ? "文件夹导入入口工作正常；桌面版会导入所选文件夹及其所有子文件夹中的文件。"
+          : "导入入口工作正常；桌面版会流式写入当前资源库。",
+      });
       return;
     }
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const paths = await open({ multiple: true, directory: false });
+    const paths = await open({ multiple: source === "files", directory: source === "folder" });
     if (!paths) return;
     const list = typeof paths === "string" ? [paths] : paths;
     const result = await controller.importPaths(list);
@@ -139,6 +152,55 @@ function App() {
         : `所选资源已在“${folder?.name ?? "文件夹"}”中`,
     });
   }, [controller.assignAssetsToFolder, controller.folders]);
+
+  const openFolder = useCallback((folder: Folder) => {
+    if (!folder.isLocked) {
+      controller.setScope(`folder:${folder.id}`);
+      return;
+    }
+    const lockOwner = controller.folders.find((item) => item.id === folder.lockOwnerId) ?? folder;
+    setFolderPassword({ folder: lockOwner, mode: "unlock", openFolderId: folder.id });
+  }, [controller.folders, controller.setScope]);
+
+  const handleFolderSecurity = useCallback((folder: Folder, action: FolderPasswordMode | "lock") => {
+    if (action === "lock") {
+      controller.setScope("all");
+      void controller.lockFolder(folder.id)
+        .then(() => setToast({ kind: "success", message: `“${folder.name}”已锁定` }))
+        .catch((reason) => setToast({ kind: "error", message: String(reason) }));
+      return;
+    }
+    setFolderPassword({ folder, mode: action });
+  }, [controller.lockFolder, controller.setScope]);
+
+  const submitFolderPassword = useCallback(async (password: string) => {
+    if (!folderPassword) return false;
+    const { folder, mode, openFolderId } = folderPassword;
+    if (mode === "encrypt") {
+      controller.setScope("all");
+      const encrypted = await controller.encryptFolder(folder.id, password);
+      if (encrypted) {
+        setFolderPassword(null);
+        setToast({ kind: "success", message: `“${folder.name}”已加密并锁定` });
+      }
+      return encrypted;
+    }
+    if (mode === "unlock") {
+      const unlocked = await controller.unlockFolder(folder.id, password);
+      if (unlocked) {
+        setFolderPassword(null);
+        controller.setScope(`folder:${openFolderId ?? folder.id}`);
+        setToast({ kind: "success", message: `“${folder.name}”已解锁` });
+      }
+      return unlocked;
+    }
+    const removed = await controller.removeFolderEncryption(folder.id, password);
+    if (removed) {
+      setFolderPassword(null);
+      setToast({ kind: "success", message: `已取消“${folder.name}”的加密` });
+    }
+    return removed;
+  }, [controller.encryptFolder, controller.removeFolderEncryption, controller.setScope, controller.unlockFolder, folderPassword]);
 
   const moveAssetsToTrash = useCallback((assets: Asset[]) => {
     void controller.trashAssets(assets.map((asset) => asset.id));
@@ -199,7 +261,8 @@ function App() {
         sortBy={controller.sortBy}
         viewMode={viewMode}
         onSearch={controller.setSearchText}
-        onImport={() => void importAssets()}
+        onImportFiles={() => void importAssets("files")}
+        onImportFolder={() => void importAssets("folder")}
         onSort={controller.setSortBy}
         onViewMode={setViewMode}
         onToggleFilters={() => setFiltersExpanded((value) => !value)}
@@ -233,6 +296,8 @@ function App() {
             smartFolders={controller.smartFolders}
             counts={controller.navigationCounts}
             onScope={controller.setScope}
+            onOpenFolder={openFolder}
+            onFolderSecurity={handleFolderSecurity}
             onCreateFolder={controller.createFolder}
             onCreateSmartFolder={controller.createSmartFolder}
             onAssignAssets={assignAssetsToFolder}
@@ -325,6 +390,16 @@ function App() {
         onInstall={() => void updater.install()}
         onCheck={() => void updater.checkForUpdates(true)}
       />
+
+      {folderPassword ? (
+        <FolderPasswordDialog
+          key={`${folderPassword.mode}:${folderPassword.folder.id}`}
+          folder={folderPassword.folder}
+          mode={folderPassword.mode}
+          onCancel={() => setFolderPassword(null)}
+          onSubmit={submitFolderPassword}
+        />
+      ) : null}
 
       {visibleError ? <div className="error-banner"><AlertCircle size={16} />{visibleError}<button onClick={handleErrorDismiss}><X size={14} /></button></div> : null}
       {toast ? (

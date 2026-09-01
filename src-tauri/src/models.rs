@@ -143,6 +143,9 @@ pub struct Folder {
     pub name: String,
     pub item_count: i64,
     pub sort_order: i64,
+    pub is_encrypted: bool,
+    pub is_locked: bool,
+    pub lock_owner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

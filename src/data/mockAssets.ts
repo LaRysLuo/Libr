@@ -55,7 +55,7 @@ export const mockAssets: Asset[] = [
   { id: "asset-beach", displayName: "度假人像.jpg", extension: "JPG", kind: "image", mime: "image/jpeg", byteSize: 4_700_000, width: 4200, height: 5600, rating: 0, favorite: false, notes: "", sourcePath: "/素材库/摄影/人像/度假人像.jpg", importedAt: now, createdAt: now, folderIds: ["folder-portrait"], tags: [tag("tag-portrait", "人像")], previewUrl: beach },
 ];
 
-const mockFolderDefinitions: Folder[] = [
+const mockFolderDefinitions: Array<Omit<Folder, "isEncrypted" | "isLocked" | "lockOwnerId">> = [
   { id: "folder-project", name: "项目", itemCount: 448, sortOrder: 0 },
   { id: "folder-brand", parentId: "folder-project", name: "品牌设计", itemCount: 230, sortOrder: 0 },
   { id: "folder-marketing", parentId: "folder-project", name: "宣传物料", itemCount: 86, sortOrder: 1 },
@@ -73,6 +73,9 @@ const mockFolderDefinitions: Folder[] = [
 export const mockFolders: Folder[] = mockFolderDefinitions.map((folder) => ({
   ...folder,
   itemCount: mockAssets.filter((asset) => asset.folderIds.includes(folder.id) && !asset.deletedAt).length,
+  isEncrypted: false,
+  isLocked: false,
+  lockOwnerId: null,
 }));
 
 export const mockSmartFolders: SmartFolder[] = [

@@ -1,6 +1,8 @@
 import {
   ChevronDown,
+  FilePlus2,
   Filter,
+  FolderOpen,
   Grid2X2,
   Import,
   LayoutGrid,
@@ -9,7 +11,7 @@ import {
   Search,
   Settings,
 } from "lucide-react";
-import type { ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { LibraryInfo, SearchQuery } from "../types";
 import { IconButton } from "./IconButton";
 
@@ -19,7 +21,8 @@ interface AppHeaderProps {
   sortBy: SearchQuery["sortBy"];
   viewMode: "grid" | "list";
   onSearch: (value: string) => void;
-  onImport: () => void;
+  onImportFiles: () => void;
+  onImportFolder: () => void;
   onSort: (value: SearchQuery["sortBy"]) => void;
   onViewMode: (value: "grid" | "list") => void;
   onToggleFilters: () => void;
@@ -34,7 +37,8 @@ export function AppHeader({
   sortBy,
   viewMode,
   onSearch,
-  onImport,
+  onImportFiles,
+  onImportFolder,
   onSort,
   onViewMode,
   onToggleFilters,
@@ -42,7 +46,30 @@ export function AppHeader({
   onLibraryMenu,
   onAppMenu,
 }: AppHeaderProps) {
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const importControlRef = useRef<HTMLDivElement>(null);
   const handleSort = (event: ChangeEvent<HTMLSelectElement>) => onSort(event.target.value as SearchQuery["sortBy"]);
+
+  useEffect(() => {
+    if (!importMenuOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!importControlRef.current?.contains(event.target as Node)) setImportMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImportMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [importMenuOpen]);
+
+  const chooseImport = (action: () => void) => {
+    setImportMenuOpen(false);
+    action();
+  };
 
   return (
     <header className="app-header" data-tauri-drag-region>
@@ -68,11 +95,34 @@ export function AppHeader({
       </label>
 
       <div className="header-actions">
-        <button type="button" className="primary-button import-button" onClick={onImport}>
-          <Import size={16} />
-          <span>导入</span>
-          <span className="button-caret"><ChevronDown size={13} /></span>
-        </button>
+        <div className="import-control" ref={importControlRef}>
+          <button type="button" className="primary-button import-button" aria-label="导入文件" onClick={onImportFiles}>
+            <Import size={16} />
+            <span>导入</span>
+          </button>
+          <button
+            type="button"
+            className="primary-button import-menu-trigger"
+            aria-label="显示导入选项"
+            aria-haspopup="menu"
+            aria-expanded={importMenuOpen}
+            onClick={() => setImportMenuOpen((open) => !open)}
+          >
+            <ChevronDown size={13} />
+          </button>
+          {importMenuOpen ? (
+            <div className="library-menu import-menu" role="menu" aria-label="导入选项">
+              <button type="button" role="menuitem" onClick={() => chooseImport(onImportFiles)}>
+                <FilePlus2 size={16} />
+                <span>导入文件…</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => chooseImport(onImportFolder)}>
+                <FolderOpen size={16} />
+                <span className="import-menu-copy"><strong>导入文件夹…</strong><small>包含所有子文件夹中的文件</small></span>
+              </button>
+            </div>
+          ) : null}
+        </div>
         <div className="segmented-control" aria-label="视图模式">
           <IconButton label="舒适网格" selected={viewMode === "grid"} onClick={() => onViewMode("grid")}><LayoutGrid size={16} /></IconButton>
           <IconButton label="紧凑网格" disabled><Grid2X2 size={16} /></IconButton>

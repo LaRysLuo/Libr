@@ -36,6 +36,23 @@ export type AspectFilter = "all" | "landscape" | "portrait" | "square";
 
 const mockTags = Array.from(new Map(mockAssets.flatMap((asset) => asset.tags).map((tag) => [tag.id, tag])).values());
 
+const applyFolderLockState = (folders: Folder[], unlockedIds: Set<string>): Folder[] => {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  return folders.map((folder) => {
+    const lineage: Folder[] = [];
+    const visited = new Set<string>();
+    let cursor: Folder | undefined = folder;
+    while (cursor && !visited.has(cursor.id)) {
+      visited.add(cursor.id);
+      lineage.push(cursor);
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
+    lineage.reverse();
+    const owner = lineage.find((item) => item.isEncrypted && !unlockedIds.has(item.id));
+    return { ...folder, isLocked: Boolean(owner), lockOwnerId: owner?.id ?? null };
+  });
+};
+
 const applyAssetPatch = (asset: Asset, patch: AssetPatch, availableTags: Tag[]): Asset => {
   const next = { ...asset };
   if (patch.displayName !== undefined) next.displayName = patch.displayName;
@@ -82,6 +99,8 @@ export function useLibraryController() {
   const [library, setLibrary] = useState<LibraryInfo | null>(isTauriRuntime() ? null : demoLibrary);
   const [assets, setAssets] = useState<Asset[]>(isTauriRuntime() ? [] : mockAssets);
   const [folders, setFolders] = useState<Folder[]>(isTauriRuntime() ? [] : mockFolders);
+  const demoFolderPasswordsRef = useRef(new Map<string, string>());
+  const demoUnlockedFoldersRef = useRef(new Set<string>());
   const [smartFolders, setSmartFolders] = useState<SmartFolder[]>(isTauriRuntime() ? [] : mockSmartFolders);
   const [tags, setTags] = useState<Tag[]>(isTauriRuntime() ? [] : mockTags);
   const tagsRef = useRef(tags);
@@ -212,6 +231,7 @@ export function useLibraryController() {
   const visibleAssets = useMemo(() => {
     if (isTauriRuntime()) return assets;
     const filtered = assets.filter((asset) => {
+      if (asset.folderIds.some((folderId) => folders.some((folder) => folder.id === folderId && folder.isLocked))) return false;
       if (scope === "favorites" && !asset.favorite) return false;
       if (scope === "trash" && !asset.deletedAt) return false;
       if (scope !== "trash" && asset.deletedAt) return false;
@@ -249,7 +269,7 @@ export function useLibraryController() {
       const rightDate = sortBy === "createdAt" ? right.createdAt : right.importedAt;
       return leftDate.localeCompare(rightDate) * direction;
     });
-  }, [aspectFilter, assets, colorFilter, dateFilter, deferredSearch, folderFilter, kindFilter, minimumRating, scope, sizeFilter, sortBy, tagFilter]);
+  }, [aspectFilter, assets, colorFilter, dateFilter, deferredSearch, folderFilter, folders, kindFilter, minimumRating, scope, sizeFilter, sortBy, tagFilter]);
 
   const selectedAssets = useMemo(() => visibleAssets.filter((asset) => selectedIds.has(asset.id)), [selectedIds, visibleAssets]);
   const navigationCounts = useMemo<NavigationCounts>(() => {
@@ -395,9 +415,65 @@ export function useLibraryController() {
       await organizationApi.createFolder(trimmed);
       await loadOrganization();
     } else {
-      setFolders((current) => [...current, { id: `folder-${crypto.randomUUID()}`, name: trimmed, itemCount: 0, sortOrder: current.length }]);
+      setFolders((current) => [...current, { id: `folder-${crypto.randomUUID()}`, name: trimmed, itemCount: 0, sortOrder: current.length, isEncrypted: false, isLocked: false, lockOwnerId: null }]);
     }
   }, [loadOrganization]);
+
+  const encryptFolder = useCallback(async (folderId: string, password: string) => {
+    if (isTauriRuntime()) {
+      await organizationApi.setFolderPassword(folderId, password);
+      await Promise.all([loadOrganization(), reloadAssets({ folderId: undefined })]);
+      return true;
+    }
+    if (Array.from(password).length !== 8 || password.trim() !== password) return false;
+    demoFolderPasswordsRef.current.set(folderId, password);
+    demoUnlockedFoldersRef.current.delete(folderId);
+    setFolders((current) => applyFolderLockState(
+      current.map((folder) => folder.id === folderId ? { ...folder, isEncrypted: true } : folder),
+      demoUnlockedFoldersRef.current,
+    ));
+    setSelectedIds(new Set());
+    return true;
+  }, [loadOrganization, reloadAssets]);
+
+  const unlockFolder = useCallback(async (folderId: string, password: string) => {
+    if (isTauriRuntime()) {
+      const unlocked = await organizationApi.unlockFolder(folderId, password);
+      if (unlocked) await Promise.all([loadOrganization(), reloadAssets()]);
+      return unlocked;
+    }
+    if (demoFolderPasswordsRef.current.get(folderId) !== password) return false;
+    demoUnlockedFoldersRef.current.add(folderId);
+    setFolders((current) => applyFolderLockState(current, demoUnlockedFoldersRef.current));
+    return true;
+  }, [loadOrganization, reloadAssets]);
+
+  const lockFolder = useCallback(async (folderId: string) => {
+    if (isTauriRuntime()) {
+      await organizationApi.lockFolder(folderId);
+      await Promise.all([loadOrganization(), reloadAssets({ folderId: undefined })]);
+    } else {
+      demoUnlockedFoldersRef.current.delete(folderId);
+      setFolders((current) => applyFolderLockState(current, demoUnlockedFoldersRef.current));
+      setSelectedIds(new Set());
+    }
+  }, [loadOrganization, reloadAssets]);
+
+  const removeFolderEncryption = useCallback(async (folderId: string, password: string) => {
+    if (isTauriRuntime()) {
+      const removed = await organizationApi.clearFolderPassword(folderId, password);
+      if (removed) await Promise.all([loadOrganization(), reloadAssets()]);
+      return removed;
+    }
+    if (demoFolderPasswordsRef.current.get(folderId) !== password) return false;
+    demoFolderPasswordsRef.current.delete(folderId);
+    demoUnlockedFoldersRef.current.delete(folderId);
+    setFolders((current) => applyFolderLockState(
+      current.map((folder) => folder.id === folderId ? { ...folder, isEncrypted: false } : folder),
+      demoUnlockedFoldersRef.current,
+    ));
+    return true;
+  }, [loadOrganization, reloadAssets]);
 
   const createTag = useCallback(async (name: string) => {
     const trimmed = name.trim();
@@ -524,6 +600,10 @@ export function useLibraryController() {
     importPaths,
     assignAssetsToFolder,
     createFolder,
+    encryptFolder,
+    unlockFolder,
+    lockFolder,
+    removeFolderEncryption,
     createTag,
     createSmartFolder,
     trashAssets,

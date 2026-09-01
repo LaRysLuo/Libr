@@ -37,8 +37,21 @@ describe("Libr desktop shell", () => {
   it("provides feedback for the import action in browser preview", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(screen.getByRole("button", { name: /^导入/ }));
+    await user.click(screen.getByRole("button", { name: "导入文件" }));
     expect(await screen.findByText(/导入入口工作正常/)).toBeInTheDocument();
+  });
+
+  it("offers recursive folder import from the import menu", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "显示导入选项" }));
+    const menu = screen.getByRole("menu", { name: "导入选项" });
+    expect(within(menu).getByText("包含所有子文件夹中的文件")).toBeInTheDocument();
+    await user.click(within(menu).getByRole("menuitem", { name: /导入文件夹/ }));
+
+    expect(screen.queryByRole("menu", { name: "导入选项" })).not.toBeInTheDocument();
+    expect(await screen.findByText(/所有子文件夹中的文件/)).toBeInTheDocument();
   });
 
   it("moves assets to trash from a red context-menu action", async () => {
@@ -67,6 +80,36 @@ describe("Libr desktop shell", () => {
     await user.selectOptions(screen.getByLabelText("形状筛选"), "portrait");
     expect(screen.getByText("人像_侧脸.jpg")).toBeInTheDocument();
     expect(screen.queryByText("城市延时.mp4")).not.toBeInTheDocument();
+  });
+
+  it("encrypts a folder and requires its 8-character password before showing contents", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "文件夹操作 文档" }));
+    await user.click(within(screen.getByRole("menu", { name: "文件夹操作 文档" })).getByRole("menuitem", { name: "加密文件夹" }));
+    const encryptDialog = screen.getByRole("dialog", { name: "加密文件夹" });
+    await user.type(within(encryptDialog).getByLabelText("设置 8 位密码"), "12345678");
+    await user.type(within(encryptDialog).getByLabelText("再次输入密码"), "12345678");
+    await user.click(within(encryptDialog).getByRole("button", { name: "确认加密" }));
+
+    expect(await screen.findByText("“文档”已加密并锁定")).toBeInTheDocument();
+    expect(screen.queryByText("需求文档.docx")).not.toBeInTheDocument();
+    const folderRow = screen.getAllByText("文档").find((element) => element.classList.contains("sidebar-label"))!.closest("button")!;
+    expect(within(folderRow).getByLabelText("已锁定")).toBeInTheDocument();
+
+    await user.click(folderRow);
+    const unlockDialog = screen.getByRole("dialog", { name: "解锁文件夹" });
+    const passwordInput = within(unlockDialog).getByLabelText("输入 8 位密码");
+    await user.type(passwordInput, "87654321");
+    await user.click(within(unlockDialog).getByRole("button", { name: "解锁并查看" }));
+    expect(await within(unlockDialog).findByText("密码不正确，请重新输入")).toBeInTheDocument();
+    await user.clear(passwordInput);
+    await user.type(passwordInput, "12345678");
+    await user.click(within(unlockDialog).getByRole("button", { name: "解锁并查看" }));
+
+    expect(await screen.findByText("需求文档.docx")).toBeInTheDocument();
+    expect(await screen.findByText("“文档”已解锁")).toBeInTheDocument();
   });
 
   it("runs the manual update state flow", async () => {

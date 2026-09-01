@@ -9,12 +9,16 @@ import {
   Heart,
   Inbox,
   Library,
+  LockKeyhole,
+  LockKeyholeOpen,
+  MoreHorizontal,
   Plus,
+  ShieldOff,
   Sparkles,
   Tag,
   Trash2,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { Folder, NavigationCounts, SmartFolder } from "../types";
 import type { NavigationScope } from "../hooks/useLibraryController";
 import { hasDraggedAssets, readDraggedAssetIds } from "../lib/drag";
@@ -25,6 +29,8 @@ interface SidebarProps {
   smartFolders: SmartFolder[];
   counts: NavigationCounts;
   onScope: (scope: NavigationScope) => void;
+  onOpenFolder: (folder: Folder) => void;
+  onFolderSecurity: (folder: Folder, action: "encrypt" | "unlock" | "lock" | "remove") => void;
   onCreateFolder: (name: string) => Promise<void> | void;
   onCreateSmartFolder: (name: string) => Promise<void> | void;
   onAssignAssets: (assetIds: string[], folderId: string) => Promise<void> | void;
@@ -43,27 +49,35 @@ interface NavRowProps {
   onDragOver?: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDragLeave?: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDrop?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  folderSecurity?: "locked" | "unlocked";
+  onMore?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  moreLabel?: string;
+  onContextMenu?: (event: React.MouseEvent<HTMLButtonElement>) => void;
 }
 
-const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, disclosure, onClick, dropActive, dropFolderId, onDragOver, onDragLeave, onDrop }: NavRowProps) {
+const NavRow = memo(function NavRow({ icon, label, count, selected, depth = 0, disclosure, onClick, dropActive, dropFolderId, onDragOver, onDragLeave, onDrop, folderSecurity, onMore, moreLabel, onContextMenu }: NavRowProps) {
   return (
-    <button
-      type="button"
-      className={`sidebar-row ${selected ? "is-selected" : ""} ${dropActive ? "is-drop-target" : ""}`}
-      data-folder-drop-target={dropFolderId}
-      style={{ paddingInlineStart: `${12 + depth * 16}px` }}
-      onClick={onClick}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-    >
-      {disclosure === "open" ? <ChevronDown size={13} /> : disclosure === "closed" ? <ChevronRight size={13} /> : <span className="disclosure-space" />}
-      <span className="sidebar-icon">{icon}</span>
-      <span className="sidebar-label">{label}</span>
-      {dropActive
-        ? <span className="sidebar-drop-hint">松开添加</span>
-        : typeof count === "number" ? <span className="sidebar-count">{count.toLocaleString("zh-CN")}</span> : null}
-    </button>
+    <div className={`sidebar-row-shell ${onMore ? "has-more" : ""}`}>
+      <button
+        type="button"
+        className={`sidebar-row ${selected ? "is-selected" : ""} ${dropActive ? "is-drop-target" : ""}`}
+        data-folder-drop-target={dropFolderId}
+        style={{ paddingInlineStart: `${12 + depth * 16}px` }}
+        onClick={onClick}
+        onContextMenu={onContextMenu}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {disclosure === "open" ? <ChevronDown size={13} /> : disclosure === "closed" ? <ChevronRight size={13} /> : <span className="disclosure-space" />}
+        <span className="sidebar-icon">{icon}</span>
+        <span className="sidebar-label">{label}</span>
+        {dropActive
+          ? <span className="sidebar-drop-hint">松开添加</span>
+          : <>{folderSecurity === "locked" ? <LockKeyhole className="folder-lock-indicator" size={13} aria-label="已锁定" /> : folderSecurity === "unlocked" ? <LockKeyholeOpen className="folder-lock-indicator" size={13} aria-label="已解锁" /> : null}{typeof count === "number" ? <span className="sidebar-count">{count.toLocaleString("zh-CN")}</span> : null}</>}
+      </button>
+      {onMore ? <button type="button" className="sidebar-row-more" aria-label={moreLabel} onClick={onMore}><MoreHorizontal size={14} /></button> : null}
+    </div>
   );
 });
 
@@ -72,10 +86,12 @@ function InlineCreate({ placeholder, onCancel, onCreate }: { placeholder: string
   return <form className="sidebar-inline-create" onSubmit={(event) => { event.preventDefault(); if (value.trim()) void Promise.resolve(onCreate(value)).then(onCancel); }}><input autoFocus aria-label={placeholder} placeholder={placeholder} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") onCancel(); }} /><button type="submit" disabled={!value.trim()}>添加</button></form>;
 }
 
-export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
+export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenFolder, onFolderSecurity, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [creating, setCreating] = useState<"folder" | "smart" | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [folderMenu, setFolderMenu] = useState<{ folderId: string; x: number; y: number } | null>(null);
+  const folderMenuRef = useRef<HTMLDivElement>(null);
   const roots = useMemo(() => folders.filter((folder) => !folder.parentId), [folders]);
   const children = useMemo(() => {
     const map = new Map<string, Folder[]>();
@@ -94,15 +110,16 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
     return next;
   });
 
-  const dropHandlers = (folderId: string) => ({
-    dropFolderId: folderId,
-    dropActive: dropTargetId === folderId,
+  const dropHandlers = (folder: Folder) => ({
+    dropFolderId: folder.isLocked ? undefined : folder.id,
+    dropActive: !folder.isLocked && dropTargetId === folder.id,
     onDragOver: (event: React.DragEvent<HTMLButtonElement>) => {
+      if (folder.isLocked) return;
       if (!hasDraggedAssets(event.dataTransfer)) return;
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = "move";
-      setDropTargetId(folderId);
+      setDropTargetId(folder.id);
     },
     onDragLeave: (event: React.DragEvent<HTMLButtonElement>) => {
       if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTargetId(null);
@@ -113,8 +130,40 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
       const assetIds = readDraggedAssetIds(event.dataTransfer);
       setDropTargetId(null);
       document.documentElement.classList.remove("is-asset-dragging");
-      if (assetIds.length) void onAssignAssets(assetIds, folderId);
+      if (assetIds.length) void onAssignAssets(assetIds, folder.id);
     },
+  });
+
+  const showFolderMenu = (event: React.MouseEvent, folderId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    setFolderMenu({ folderId, x: event.clientX || rect.right, y: event.clientY || rect.bottom });
+  };
+
+  useEffect(() => {
+    if (!folderMenu) return;
+    const close = (event: MouseEvent) => {
+      if (!folderMenuRef.current?.contains(event.target as Node)) setFolderMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFolderMenu(null);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [folderMenu]);
+
+  const activeMenuFolder = folderMenu ? folders.find((folder) => folder.id === folderMenu.folderId) : undefined;
+  const lockOwner = activeMenuFolder?.lockOwnerId ? folders.find((folder) => folder.id === activeMenuFolder.lockOwnerId) : activeMenuFolder;
+  const folderRowActions = (folder: Folder) => ({
+    folderSecurity: folder.isLocked ? "locked" as const : folder.isEncrypted ? "unlocked" as const : undefined,
+    moreLabel: `文件夹操作 ${folder.name}`,
+    onMore: (event: React.MouseEvent<HTMLButtonElement>) => showFolderMenu(event, folder.id),
+    onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => showFolderMenu(event, folder.id),
   });
 
   return (
@@ -141,8 +190,9 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
                 count={root.itemCount}
                 selected={scope === `folder:${root.id}`}
                 disclosure={nested.length ? (isCollapsed ? "closed" : "open") : undefined}
-                onClick={() => nested.length ? toggleFolder(root.id) : onScope(`folder:${root.id}`)}
-                {...dropHandlers(root.id)}
+                onClick={() => root.isLocked ? onOpenFolder(root) : nested.length ? toggleFolder(root.id) : onOpenFolder(root)}
+                {...dropHandlers(root)}
+                {...folderRowActions(root)}
               />
               {!isCollapsed ? nested.map((folder) => (
                 <NavRow
@@ -152,8 +202,9 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
                   count={folder.itemCount}
                   depth={1}
                   selected={scope === `folder:${folder.id}`}
-                  onClick={() => onScope(`folder:${folder.id}`)}
-                  {...dropHandlers(folder.id)}
+                  onClick={() => onOpenFolder(folder)}
+                  {...dropHandlers(folder)}
+                  {...folderRowActions(folder)}
                 />
               )) : null}
             </div>
@@ -180,6 +231,26 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onCreat
       <nav className="sidebar-bottom">
         <NavRow icon={<Trash2 size={16} />} label="回收站" count={counts.trash} selected={scope === "trash"} onClick={() => onScope("trash")} />
       </nav>
+      {folderMenu && activeMenuFolder ? (
+        <div
+          ref={folderMenuRef}
+          className="folder-context-menu"
+          role="menu"
+          aria-label={`文件夹操作 ${activeMenuFolder.name}`}
+          style={{ left: Math.max(8, Math.min(folderMenu.x, window.innerWidth - 190)), top: Math.max(8, Math.min(folderMenu.y, window.innerHeight - 128)) }}
+        >
+          {activeMenuFolder.isLocked && lockOwner ? (
+            <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(lockOwner, "unlock"); }}><LockKeyholeOpen size={14} />解锁{lockOwner.id === activeMenuFolder.id ? "文件夹" : `“${lockOwner.name}”`}</button>
+          ) : activeMenuFolder.isEncrypted ? (
+            <>
+              <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(activeMenuFolder, "lock"); }}><LockKeyhole size={14} />立即锁定</button>
+              <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(activeMenuFolder, "remove"); }}><ShieldOff size={14} />取消加密</button>
+            </>
+          ) : (
+            <button type="button" role="menuitem" onClick={() => { setFolderMenu(null); onFolderSecurity(activeMenuFolder, "encrypt"); }}><LockKeyhole size={14} />加密文件夹</button>
+          )}
+        </div>
+      ) : null}
     </aside>
   );
 }

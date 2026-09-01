@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -59,6 +60,24 @@ fn authorize_asset(state: &AppState, asset: &mut Asset) {
     asset.stream_token = Some(state.stream_tokens.lock().token_for(&asset.id));
 }
 
+fn blocked_folder_ids(
+    state: &AppState,
+    session: &db::LibrarySession,
+) -> LibrResult<HashSet<String>> {
+    let unlocked = state.unlocked_folders.lock().clone();
+    Ok(db::folder_lock_owners(session, &unlocked)?
+        .into_keys()
+        .collect())
+}
+
+fn ensure_folder_accessible(blocked: &HashSet<String>, folder_id: &str) -> LibrResult<()> {
+    if blocked.contains(folder_id) {
+        Err(LibrError::Other("文件夹已锁定，请先输入密码解锁".into()))
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub fn library_create(
     app: AppHandle,
@@ -71,6 +90,7 @@ pub fn library_create(
     let library_path = session.path.clone();
     *state.session.lock() = Some(session);
     state.stream_tokens.lock().clear();
+    state.unlocked_folders.lock().clear();
     remember_library(&app, &library_path);
     Ok(info)
 }
@@ -86,6 +106,7 @@ pub fn library_open(
     let library_path = session.path.clone();
     *state.session.lock() = Some(session);
     state.stream_tokens.lock().clear();
+    state.unlocked_folders.lock().clear();
     remember_library(&app, &library_path);
     Ok(info)
 }
@@ -94,6 +115,7 @@ pub fn library_open(
 pub fn library_close(state: State<'_, AppState>) {
     *state.session.lock() = None;
     state.stream_tokens.lock().clear();
+    state.unlocked_folders.lock().clear();
 }
 
 #[tauri::command]
@@ -156,13 +178,20 @@ pub fn library_compact(state: State<'_, AppState>) -> LibrResult<LibraryInfo> {
     let info = db::library_info(&reopened)?;
     *guard = Some(reopened);
     compact_result?;
+    state.unlocked_folders.lock().clear();
+    state.stream_tokens.lock().clear();
     Ok(info)
 }
 
 #[tauri::command]
 pub fn asset_list(state: State<'_, AppState>, query: SearchQuery) -> LibrResult<Vec<Asset>> {
     let guard = state.session.lock();
-    let mut assets = db::list_assets(guard.as_ref().ok_or(LibrError::NoLibrary)?, &query)?;
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    if let Some(folder_id) = &query.folder_id {
+        ensure_folder_accessible(&blocked, folder_id)?;
+    }
+    let mut assets = db::list_assets_with_blocked_folders(session, &query, &blocked)?;
     drop(guard);
     for asset in &mut assets {
         authorize_asset(state.inner(), asset);
@@ -177,6 +206,11 @@ pub async fn asset_import(
     paths: Vec<String>,
     folder_id: Option<String>,
 ) -> LibrResult<ImportResult> {
+    if let Some(folder_id) = folder_id.as_deref() {
+        let guard = state.session.lock();
+        let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+        ensure_folder_accessible(&blocked_folder_ids(state.inner(), session)?, folder_id)?;
+    }
     let job_id = Uuid::new_v4().to_string();
     let files = collect_files(&paths);
     let total = files.len();
@@ -275,6 +309,9 @@ pub fn asset_update(
     patch: AssetPatch,
 ) -> LibrResult<Asset> {
     let mut guard = state.session.lock();
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    db::ensure_assets_accessible(session, std::slice::from_ref(&asset_id), &blocked)?;
     let mut asset = db::update_asset(
         guard.as_mut().ok_or(LibrError::NoLibrary)?,
         &asset_id,
@@ -288,6 +325,9 @@ pub fn asset_update(
 #[tauri::command]
 pub fn asset_trash(state: State<'_, AppState>, asset_ids: Vec<String>) -> LibrResult<()> {
     let mut guard = state.session.lock();
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    db::ensure_assets_accessible(session, &asset_ids, &blocked)?;
     db::set_assets_deleted(
         guard.as_mut().ok_or(LibrError::NoLibrary)?,
         &asset_ids,
@@ -298,6 +338,9 @@ pub fn asset_trash(state: State<'_, AppState>, asset_ids: Vec<String>) -> LibrRe
 #[tauri::command]
 pub fn asset_restore(state: State<'_, AppState>, asset_ids: Vec<String>) -> LibrResult<()> {
     let mut guard = state.session.lock();
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    db::ensure_assets_accessible(session, &asset_ids, &blocked)?;
     db::set_assets_deleted(
         guard.as_mut().ok_or(LibrError::NoLibrary)?,
         &asset_ids,
@@ -308,6 +351,9 @@ pub fn asset_restore(state: State<'_, AppState>, asset_ids: Vec<String>) -> Libr
 #[tauri::command]
 pub fn asset_purge(state: State<'_, AppState>, asset_ids: Vec<String>) -> LibrResult<()> {
     let mut guard = state.session.lock();
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    db::ensure_assets_accessible(session, &asset_ids, &blocked)?;
     db::purge_assets(guard.as_mut().ok_or(LibrError::NoLibrary)?, &asset_ids)
 }
 
@@ -318,6 +364,9 @@ pub fn asset_export(
     destination: String,
 ) -> LibrResult<()> {
     let guard = state.session.lock();
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    db::ensure_assets_accessible(session, &asset_ids, &blocked)?;
     db::export_assets(
         guard.as_ref().ok_or(LibrError::NoLibrary)?,
         &asset_ids,
@@ -340,6 +389,8 @@ pub fn asset_open_external(
     fs::create_dir_all(&cache_root)?;
     let guard = state.session.lock();
     let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let blocked = blocked_folder_ids(state.inner(), session)?;
+    db::ensure_assets_accessible(session, std::slice::from_ref(&asset_id), &blocked)?;
     let asset = db::get_asset(session, &asset_id)?;
     let destination = cache_root.join(asset.display_name.replace(['/', '\\'], "_"));
     let mut target = fs::File::create(&destination)?;
@@ -354,7 +405,15 @@ pub fn asset_open_external(
 #[tauri::command]
 pub fn folder_list(state: State<'_, AppState>) -> LibrResult<Vec<Folder>> {
     let guard = state.session.lock();
-    db::list_folders(guard.as_ref().ok_or(LibrError::NoLibrary)?)
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    let unlocked = state.unlocked_folders.lock().clone();
+    let owners = db::folder_lock_owners(session, &unlocked)?;
+    let mut folders = db::list_folders(session)?;
+    for folder in &mut folders {
+        folder.lock_owner_id = owners.get(&folder.id).cloned();
+        folder.is_locked = folder.lock_owner_id.is_some();
+    }
+    Ok(folders)
 }
 
 #[tauri::command]
@@ -364,6 +423,13 @@ pub fn folder_assign_assets(
     asset_ids: Vec<String>,
 ) -> LibrResult<usize> {
     let mut guard = state.session.lock();
+    let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    ensure_folder_accessible(&blocked_folder_ids(state.inner(), session)?, &folder_id)?;
+    db::ensure_assets_accessible(
+        session,
+        &asset_ids,
+        &blocked_folder_ids(state.inner(), session)?,
+    )?;
     db::assign_assets_to_folder(
         guard.as_mut().ok_or(LibrError::NoLibrary)?,
         &folder_id,
@@ -404,7 +470,65 @@ pub fn folder_update(
 #[tauri::command]
 pub fn folder_delete(state: State<'_, AppState>, id: String) -> LibrResult<()> {
     let mut guard = state.session.lock();
-    db::delete_folder(guard.as_mut().ok_or(LibrError::NoLibrary)?, &id)
+    db::delete_folder(guard.as_mut().ok_or(LibrError::NoLibrary)?, &id)?;
+    state.unlocked_folders.lock().remove(&id);
+    state.stream_tokens.lock().clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn folder_set_password(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+) -> LibrResult<()> {
+    let mut guard = state.session.lock();
+    db::set_folder_password(guard.as_mut().ok_or(LibrError::NoLibrary)?, &id, &password)?;
+    state.unlocked_folders.lock().remove(&id);
+    state.stream_tokens.lock().clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn folder_unlock(state: State<'_, AppState>, id: String, password: String) -> LibrResult<bool> {
+    let guard = state.session.lock();
+    let verified =
+        db::verify_folder_password(guard.as_ref().ok_or(LibrError::NoLibrary)?, &id, &password)?;
+    if verified {
+        state.unlocked_folders.lock().insert(id);
+    }
+    Ok(verified)
+}
+
+#[tauri::command]
+pub fn folder_lock(state: State<'_, AppState>, id: String) -> LibrResult<()> {
+    let guard = state.session.lock();
+    let folder = db::list_folders(guard.as_ref().ok_or(LibrError::NoLibrary)?)?
+        .into_iter()
+        .find(|folder| folder.id == id)
+        .ok_or_else(|| LibrError::Other("文件夹不存在".into()))?;
+    if !folder.is_encrypted {
+        return Err(LibrError::Other("文件夹尚未加密".into()));
+    }
+    state.unlocked_folders.lock().remove(&id);
+    state.stream_tokens.lock().clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn folder_clear_password(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+) -> LibrResult<bool> {
+    let mut guard = state.session.lock();
+    let cleared =
+        db::clear_folder_password(guard.as_mut().ok_or(LibrError::NoLibrary)?, &id, &password)?;
+    if cleared {
+        state.unlocked_folders.lock().remove(&id);
+        state.stream_tokens.lock().clear();
+    }
+    Ok(cleared)
 }
 
 #[tauri::command]
@@ -459,4 +583,25 @@ pub fn smart_folder_upsert(
 pub fn smart_folder_delete(state: State<'_, AppState>, id: String) -> LibrResult<()> {
     let mut guard = state.session.lock();
     db::delete_smart_folder(guard.as_mut().ok_or(LibrError::NoLibrary)?, &id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_files;
+    use std::fs;
+
+    #[test]
+    fn collects_every_file_from_nested_import_folders() {
+        let temporary = tempfile::tempdir().unwrap();
+        let nested = temporary.path().join("first").join("second");
+        fs::create_dir_all(&nested).unwrap();
+        let root_file = temporary.path().join("root.jpg");
+        let nested_file = nested.join("nested.txt");
+        fs::write(&root_file, b"root").unwrap();
+        fs::write(&nested_file, b"nested").unwrap();
+
+        let files = collect_files(&[temporary.path().to_string_lossy().into_owned()]);
+
+        assert_eq!(files, vec![nested_file, root_file]);
+    }
 }

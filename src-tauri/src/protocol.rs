@@ -48,6 +48,28 @@ pub fn respond(
             None,
         );
     };
+    let unlocked = state.unlocked_folders.lock().clone();
+    let blocked = match db::folder_lock_owners(session, &unlocked) {
+        Ok(owners) => owners.into_keys().collect(),
+        Err(_) => {
+            return response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "text/plain",
+                b"access check failed".to_vec(),
+                None,
+                None,
+            )
+        }
+    };
+    if db::ensure_assets_accessible(session, std::slice::from_ref(&asset_id), &blocked).is_err() {
+        return response(
+            StatusCode::UNAUTHORIZED,
+            "text/plain",
+            b"folder locked".to_vec(),
+            None,
+            None,
+        );
+    }
     let Ok((mime, total)) = db::protocol_metadata(session, &asset_id, preview) else {
         return response(
             StatusCode::NOT_FOUND,

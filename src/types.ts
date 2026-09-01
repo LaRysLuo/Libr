@@ -67,6 +67,9 @@ export interface Folder {
   name: string;
   itemCount: number;
   sortOrder: number;
+  isEncrypted: boolean;
+  isLocked: boolean;
+  lockOwnerId?: string | null;
 }
 
 export interface Tag {

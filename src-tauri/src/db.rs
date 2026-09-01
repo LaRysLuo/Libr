@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
@@ -20,7 +20,7 @@ use crate::{
     models::{Asset, AssetKind, AssetPatch, Folder, LibraryInfo, SearchQuery, SmartFolder, Tag},
 };
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 pub const APPLICATION_ID: i64 = 0x4C49_4252;
 
 pub struct LibrarySession {
@@ -86,7 +86,12 @@ pub fn open_library(path: &Path) -> LibrResult<LibrarySession> {
     if application_id != APPLICATION_ID {
         return Err(LibrError::InvalidLibrary);
     }
-    let schema_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut schema_version: i64 =
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if lock_acquired && schema_version < SCHEMA_VERSION {
+        migrate_schema(&conn, schema_version)?;
+        schema_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    }
     let read_only = !lock_acquired || schema_version > SCHEMA_VERSION;
     if read_only {
         conn.pragma_update(None, "query_only", true)?;
@@ -113,6 +118,18 @@ fn configure_writable(conn: &Connection) -> LibrResult<()> {
 
 fn acquire_exclusive_session(conn: &Connection) -> LibrResult<()> {
     conn.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")?;
+    Ok(())
+}
+
+fn migrate_schema(conn: &Connection, from_version: i64) -> LibrResult<()> {
+    if from_version < 2 {
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE folders ADD COLUMN password_hash TEXT;
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -161,6 +178,7 @@ fn initialize_schema(conn: &mut Connection, name: &str) -> LibrResult<()> {
            name TEXT NOT NULL,
            sort_order INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
+           password_hash TEXT,
            UNIQUE(parent_id, name)
          );
          CREATE TABLE asset_folders (
@@ -307,7 +325,16 @@ pub fn integrity_check(session: &LibrarySession) -> LibrResult<Vec<String>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+#[cfg(test)]
 pub fn list_assets(session: &LibrarySession, query: &SearchQuery) -> LibrResult<Vec<Asset>> {
+    list_assets_with_blocked_folders(session, query, &HashSet::new())
+}
+
+pub fn list_assets_with_blocked_folders(
+    session: &LibrarySession,
+    query: &SearchQuery,
+    blocked_folder_ids: &HashSet<String>,
+) -> LibrResult<Vec<Asset>> {
     let mut sql = String::from(
         "SELECT a.id, a.display_name, a.extension, a.kind, a.mime, a.byte_size,
                 a.width, a.height, a.duration_ms, a.rating, a.favorite, a.color_label,
@@ -322,6 +349,13 @@ pub fn list_assets(session: &LibrarySession, query: &SearchQuery) -> LibrResult<
         "a.deleted_at IS NULL"
     });
     let mut values: Vec<Value> = Vec::new();
+
+    if !blocked_folder_ids.is_empty() {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM asset_folders protected_af WHERE protected_af.asset_id = a.id AND protected_af.folder_id IN (");
+        sql.push_str(&vec!["?"; blocked_folder_ids.len()].join(","));
+        sql.push_str("))");
+        values.extend(blocked_folder_ids.iter().cloned().map(Value::Text));
+    }
 
     if let Some(text) = query.text.as_ref().filter(|value| !value.trim().is_empty()) {
         if text.trim().chars().count() >= 3 {
@@ -753,24 +787,199 @@ pub fn purge_assets(session: &mut LibrarySession, asset_ids: &[String]) -> LibrR
 }
 
 pub fn list_folders(session: &LibrarySession) -> LibrResult<Vec<Folder>> {
-    let mut statement = session.conn.prepare(
-        "SELECT f.id, f.parent_id, f.name, COUNT(a.id), f.sort_order
+    let schema_version: i64 = session
+        .conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let encryption_column = if schema_version >= 2 {
+        "f.password_hash IS NOT NULL"
+    } else {
+        "0"
+    };
+    let sql = format!(
+        "SELECT f.id, f.parent_id, f.name, COUNT(a.id), f.sort_order, {encryption_column}
          FROM folders f LEFT JOIN asset_folders af ON af.folder_id = f.id
          LEFT JOIN assets a ON a.id = af.asset_id AND a.deleted_at IS NULL
-         GROUP BY f.id ORDER BY f.parent_id IS NOT NULL, f.sort_order, f.name COLLATE NOCASE",
-    )?;
+         GROUP BY f.id ORDER BY f.parent_id IS NOT NULL, f.sort_order, f.name COLLATE NOCASE"
+    );
+    let mut statement = session.conn.prepare(&sql)?;
     let folders = statement
         .query_map([], |row| {
+            let is_encrypted = row.get::<_, i64>(5)? != 0;
             Ok(Folder {
                 id: row.get(0)?,
                 parent_id: row.get(1)?,
                 name: row.get(2)?,
                 item_count: row.get(3)?,
                 sort_order: row.get(4)?,
+                is_encrypted,
+                is_locked: is_encrypted,
+                lock_owner_id: None,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(folders)
+}
+
+pub fn folder_lock_owners(
+    session: &LibrarySession,
+    unlocked_folder_ids: &HashSet<String>,
+) -> LibrResult<HashMap<String, String>> {
+    let folders = list_folders(session)?;
+    let parent_by_id: HashMap<String, Option<String>> = folders
+        .iter()
+        .map(|folder| (folder.id.clone(), folder.parent_id.clone()))
+        .collect();
+    let encrypted_ids: HashSet<String> = folders
+        .iter()
+        .filter(|folder| folder.is_encrypted && !unlocked_folder_ids.contains(&folder.id))
+        .map(|folder| folder.id.clone())
+        .collect();
+    let mut owners = HashMap::new();
+
+    for folder in &folders {
+        let mut lineage = Vec::new();
+        let mut cursor = Some(folder.id.clone());
+        let mut visited = HashSet::new();
+        while let Some(id) = cursor {
+            if !visited.insert(id.clone()) {
+                break;
+            }
+            lineage.push(id.clone());
+            cursor = parent_by_id.get(&id).cloned().flatten();
+        }
+        lineage.reverse();
+        if let Some(owner_id) = lineage.into_iter().find(|id| encrypted_ids.contains(id)) {
+            owners.insert(folder.id.clone(), owner_id);
+        }
+    }
+    Ok(owners)
+}
+
+pub fn ensure_assets_accessible(
+    session: &LibrarySession,
+    asset_ids: &[String],
+    blocked_folder_ids: &HashSet<String>,
+) -> LibrResult<()> {
+    if blocked_folder_ids.is_empty() || asset_ids.is_empty() {
+        return Ok(());
+    }
+    let mut statement = session
+        .conn
+        .prepare("SELECT folder_id FROM asset_folders WHERE asset_id = ?1")?;
+    for asset_id in asset_ids {
+        let folder_ids = statement
+            .query_map([asset_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if folder_ids.iter().any(|id| blocked_folder_ids.contains(id)) {
+            return Err(LibrError::Other("文件夹已锁定，请先输入密码解锁".into()));
+        }
+    }
+    Ok(())
+}
+
+const PASSWORD_HASH_ROUNDS: usize = 25_000;
+
+fn validate_folder_password(password: &str) -> LibrResult<()> {
+    if password.trim() != password || password.chars().count() != 8 {
+        return Err(LibrError::Other(
+            "密码必须正好为 8 位，且不能包含首尾空格".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn derive_folder_password(password: &str, salt: &str) -> String {
+    let mut digest = Sha256::digest(format!("{salt}:{password}").as_bytes()).to_vec();
+    for _ in 1..PASSWORD_HASH_ROUNDS {
+        let mut hasher = Sha256::new();
+        hasher.update(salt.as_bytes());
+        hasher.update(&digest);
+        digest = hasher.finalize().to_vec();
+    }
+    hex::encode(digest)
+}
+
+fn folder_password_record(session: &LibrarySession, id: &str) -> LibrResult<Option<String>> {
+    session
+        .conn
+        .query_row(
+            "SELECT password_hash FROM folders WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| LibrError::Other("文件夹不存在".into()))
+}
+
+fn verify_folder_password_record(record: &str, password: &str) -> bool {
+    let mut parts = record.split('$');
+    let (Some("v1"), Some(salt), Some(expected), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let actual = derive_folder_password(password, salt);
+    actual.len() == expected.len()
+        && actual
+            .as_bytes()
+            .iter()
+            .zip(expected.as_bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
+}
+
+pub fn set_folder_password(
+    session: &mut LibrarySession,
+    id: &str,
+    password: &str,
+) -> LibrResult<()> {
+    if session.read_only {
+        return Err(LibrError::ReadOnly);
+    }
+    validate_folder_password(password)?;
+    if folder_password_record(session, id)?.is_some() {
+        return Err(LibrError::Other("文件夹已经加密".into()));
+    }
+    let salt = Uuid::new_v4().simple().to_string();
+    let record = format!("v1${salt}${}", derive_folder_password(password, &salt));
+    session.conn.execute(
+        "UPDATE folders SET password_hash = ?1 WHERE id = ?2",
+        params![record, id],
+    )?;
+    touch_library(&session.conn)?;
+    Ok(())
+}
+
+pub fn verify_folder_password(
+    session: &LibrarySession,
+    id: &str,
+    password: &str,
+) -> LibrResult<bool> {
+    validate_folder_password(password)?;
+    Ok(folder_password_record(session, id)?
+        .as_deref()
+        .is_some_and(|record| verify_folder_password_record(record, password)))
+}
+
+pub fn clear_folder_password(
+    session: &mut LibrarySession,
+    id: &str,
+    password: &str,
+) -> LibrResult<bool> {
+    if session.read_only {
+        return Err(LibrError::ReadOnly);
+    }
+    if !verify_folder_password(session, id, password)? {
+        return Ok(false);
+    }
+    session.conn.execute(
+        "UPDATE folders SET password_hash = NULL WHERE id = ?1",
+        [id],
+    )?;
+    touch_library(&session.conn)?;
+    Ok(true)
 }
 
 pub fn assign_assets_to_folder(
@@ -828,6 +1037,9 @@ pub fn create_folder(
         name: name.trim().to_owned(),
         item_count: 0,
         sort_order,
+        is_encrypted: false,
+        is_locked: false,
+        lock_owner_id: None,
     })
 }
 
@@ -1265,6 +1477,64 @@ mod tests {
         let after = library_info(&session).unwrap();
         assert_eq!(after.asset_count, 1);
         assert_eq!(after.trash_count, 1);
+    }
+
+    #[test]
+    fn folder_passwords_lock_descendants_and_can_be_removed() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("protected.libr");
+        let mut session = create_library(&path, "protected").unwrap();
+        let parent = create_folder(&mut session, "私密", None).unwrap();
+        let child = create_folder(&mut session, "子文件夹", Some(&parent.id)).unwrap();
+        let source = temp.path().join("secret.txt");
+        fs::write(&source, "private content").unwrap();
+        let asset = import_file(&mut session, &source, Some(&child.id))
+            .unwrap()
+            .asset;
+
+        set_folder_password(&mut session, &parent.id, "12345678").unwrap();
+        assert!(!verify_folder_password(&session, &parent.id, "87654321").unwrap());
+        assert!(verify_folder_password(&session, &parent.id, "12345678").unwrap());
+
+        let locked = folder_lock_owners(&session, &HashSet::new()).unwrap();
+        assert_eq!(locked.get(&parent.id), Some(&parent.id));
+        assert_eq!(locked.get(&child.id), Some(&parent.id));
+        let blocked_ids = locked.into_keys().collect();
+        assert!(
+            list_assets_with_blocked_folders(&session, &SearchQuery::default(), &blocked_ids)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(ensure_assets_accessible(&session, &[asset.id], &blocked_ids).is_err());
+
+        let unlocked = HashSet::from([parent.id.clone()]);
+        assert!(folder_lock_owners(&session, &unlocked).unwrap().is_empty());
+        assert!(!clear_folder_password(&mut session, &parent.id, "87654321").unwrap());
+        assert!(clear_folder_password(&mut session, &parent.id, "12345678").unwrap());
+        assert!(!list_folders(&session).unwrap()[0].is_encrypted);
+    }
+
+    #[test]
+    fn opening_a_v1_library_migrates_folder_password_storage() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("legacy.libr");
+        drop(create_library(&path, "legacy").unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE folders DROP COLUMN password_hash; PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut session = open_library(&path).unwrap();
+        assert_eq!(
+            session
+                .conn
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        create_folder(&mut session, "可加密", None).unwrap();
     }
 
     #[test]
