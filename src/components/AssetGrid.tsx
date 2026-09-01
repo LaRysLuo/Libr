@@ -1,5 +1,5 @@
-import { Check, ListChecks, Pause, Play, Star } from "lucide-react";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Check, ListChecks, Pause, Play, Star, Trash2 } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Asset } from "../types";
 import { ASSET_DRAG_TYPE } from "../lib/drag";
 import { AssetArtwork } from "./AssetArtwork";
@@ -14,6 +14,7 @@ interface AssetGridProps {
   onOpen: (asset: Asset) => void;
   onToggleFavorite: (asset: Asset) => void;
   onAssignAssets: (assetIds: string[], folderId: string) => Promise<void> | void;
+  onDelete: (assets: Asset[]) => void;
 }
 
 const formatDuration = (durationMs?: number | null) => {
@@ -23,6 +24,7 @@ const formatDuration = (durationMs?: number | null) => {
 };
 
 const AUDIO_PREVIEW_EVENT = "libr:audio-preview-play";
+const EMPTY_ASSETS: Asset[] = [];
 
 function AudioPreviewControl({ asset }: { asset: Asset }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -126,6 +128,7 @@ const AssetCard = memo(function AssetCard({
   onDragStart,
   onDragEnd,
   onPointerDown,
+  onContextMenu,
 }: {
   asset: Asset;
   selected: boolean;
@@ -135,6 +138,7 @@ const AssetCard = memo(function AssetCard({
   onDragStart: (event: React.DragEvent<HTMLElement>) => void;
   onDragEnd: (event: React.DragEvent<HTMLElement>) => void;
   onPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
+  onContextMenu: (event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => void;
 }) {
   const duration = formatDuration(asset.durationMs);
   return (
@@ -148,9 +152,14 @@ const AssetCard = memo(function AssetCard({
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onPointerDown={onPointerDown}
+      onContextMenu={onContextMenu}
       onDoubleClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === "Enter") onOpen();
+        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          onContextMenu(event);
+        }
       }}
     >
       <div className="asset-thumbnail">
@@ -168,9 +177,18 @@ const AssetCard = memo(function AssetCard({
   );
 });
 
-export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loading, onSelect, onOpen, onToggleFavorite, onAssignAssets }: AssetGridProps) {
+interface AssetContextMenuState {
+  assetIds: string[];
+  x: number;
+  y: number;
+}
+
+export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loading, onSelect, onOpen, onToggleFavorite, onAssignAssets, onDelete }: AssetGridProps) {
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const suppressClickRef = useRef(false);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const contextMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const [contextMenu, setContextMenu] = useState<AssetContextMenuState | null>(null);
   const handleSelect = useCallback((assetId: string, event: React.MouseEvent) => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
@@ -259,6 +277,32 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
     cleanupPointerDrag(false);
   }, [cleanupPointerDrag]);
 
+  const openContextMenu = useCallback((assetId: string, event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) => {
+    event.preventDefault();
+    const assetIds = selectedIds.has(assetId) ? [...selectedIds] : [assetId];
+    if (!selectedIds.has(assetId)) onSelect(assetId);
+    const rect = event.currentTarget.getBoundingClientRect();
+    const mouseEvent = "clientX" in event ? event : null;
+    setContextMenu({
+      assetIds,
+      x: mouseEvent?.clientX || rect.left + 16,
+      y: mouseEvent?.clientY || rect.top + 16,
+    });
+  }, [onSelect, selectedIds]);
+
+  const contextAssets = useMemo(() => {
+    if (!contextMenu) return EMPTY_ASSETS;
+    const contextAssetIds = new Set(contextMenu.assetIds);
+    return assets.filter((asset) => contextAssetIds.has(asset.id));
+  }, [assets, contextMenu]);
+  const permanentlyDelete = contextAssets.length > 0 && contextAssets.every((asset) => Boolean(asset.deletedAt));
+
+  const deleteFromContextMenu = useCallback(() => {
+    if (!contextAssets.length) return;
+    onDelete(contextAssets);
+    setContextMenu(null);
+  }, [contextAssets, onDelete]);
+
   useEffect(() => {
     window.addEventListener("pointermove", handlePointerMove, { passive: false });
     window.addEventListener("pointerup", handlePointerUp);
@@ -271,6 +315,30 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
   }, [handlePointerCancel, handlePointerMove, handlePointerUp]);
 
   useEffect(() => () => cleanupPointerDrag(false), [cleanupPointerDrag]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    contextMenuButtonRef.current?.focus();
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!contextMenuRef.current?.contains(event.target as Node)) setContextMenu(null);
+    };
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(null);
+    };
+    const close = () => setContextMenu(null);
+    window.addEventListener("pointerdown", closeFromOutside, true);
+    window.addEventListener("keydown", closeFromKeyboard);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", closeFromOutside, true);
+      window.removeEventListener("keydown", closeFromKeyboard);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [contextMenu]);
 
   if (!loading && assets.length === 0) {
     return (
@@ -302,9 +370,35 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
             onDragStart={(event) => handleDragStart(asset.id, event)}
             onDragEnd={handleDragEnd}
             onPointerDown={(event) => handlePointerDown(asset.id, event)}
+            onContextMenu={(event) => openContextMenu(asset.id, event)}
           />
         ))}
       </div>
+      {contextMenu && contextAssets.length > 0 ? (
+        <div
+          ref={contextMenuRef}
+          className="asset-context-menu"
+          role="menu"
+          aria-label="资源操作"
+          style={{
+            left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 224)),
+            top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 58)),
+          }}
+        >
+          <button
+            ref={contextMenuButtonRef}
+            type="button"
+            role="menuitem"
+            className="asset-context-menu-item is-danger"
+            onClick={deleteFromContextMenu}
+          >
+            <Trash2 size={15} />
+            {permanentlyDelete
+              ? contextAssets.length === 1 ? "永久删除" : `永久删除 ${contextAssets.length} 项`
+              : contextAssets.length === 1 ? "移到回收站" : `将 ${contextAssets.length} 项移到回收站`}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

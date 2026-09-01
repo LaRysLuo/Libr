@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod models;
+mod preferences;
 mod protocol;
 mod state;
 
@@ -19,7 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .register_uri_scheme_protocol("libr", protocol::respond)
         .setup(|app| {
-            if let Some(path) =
+            let command_line_library =
                 std::env::args()
                     .skip(1)
                     .map(std::path::PathBuf::from)
@@ -27,10 +28,29 @@ pub fn run() {
                         path.extension()
                             .and_then(|value| value.to_str())
                             .is_some_and(|value| value.eq_ignore_ascii_case("libr"))
-                    })
-            {
-                if let Ok(session) = db::open_library(&path) {
-                    *app.state::<AppState>().session.lock() = Some(session);
+                    });
+            let config_dir = app.path().app_config_dir()?;
+            let startup_library = command_line_library
+                .as_ref()
+                .cloned()
+                .or_else(|| preferences::last_library_path(&config_dir));
+
+            if let Some(path) = startup_library {
+                match db::open_library(&path) {
+                    Ok(session) => {
+                        let opened_path = session.path.clone();
+                        *app.state::<AppState>().session.lock() = Some(session);
+                        if let Err(error) = preferences::remember_library(&config_dir, &opened_path)
+                        {
+                            eprintln!("无法记住最近打开的资源库：{error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("无法恢复上次打开的资源库：{error}");
+                        if command_line_library.is_none() {
+                            let _ = preferences::forget_library(&config_dir);
+                        }
+                    }
                 }
             }
             Ok(())

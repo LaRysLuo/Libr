@@ -14,8 +14,20 @@ use crate::{
         Asset, AssetPatch, FailedImport, Folder, ImportResult, JobProgress, LibraryInfo,
         SearchQuery, SmartFolder, Tag,
     },
+    preferences,
     state::AppState,
 };
+
+fn remember_library(app: &AppHandle, path: &Path) {
+    let result = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| LibrError::Other(error.to_string()))
+        .and_then(|config_dir| preferences::remember_library(&config_dir, path));
+    if let Err(error) = result {
+        eprintln!("无法记住最近打开的资源库：{error}");
+    }
+}
 
 fn emit_progress(app: &AppHandle, progress: JobProgress) {
     let _ = app.emit("job-progress", progress);
@@ -49,23 +61,32 @@ fn authorize_asset(state: &AppState, asset: &mut Asset) {
 
 #[tauri::command]
 pub fn library_create(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     name: String,
 ) -> LibrResult<LibraryInfo> {
     let session = db::create_library(Path::new(&path), &name)?;
     let info = db::library_info(&session)?;
+    let library_path = session.path.clone();
     *state.session.lock() = Some(session);
     state.stream_tokens.lock().clear();
+    remember_library(&app, &library_path);
     Ok(info)
 }
 
 #[tauri::command]
-pub fn library_open(state: State<'_, AppState>, path: String) -> LibrResult<LibraryInfo> {
+pub fn library_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> LibrResult<LibraryInfo> {
     let session = db::open_library(Path::new(&path))?;
     let info = db::library_info(&session)?;
+    let library_path = session.path.clone();
     *state.session.lock() = Some(session);
     state.stream_tokens.lock().clear();
+    remember_library(&app, &library_path);
     Ok(info)
 }
 

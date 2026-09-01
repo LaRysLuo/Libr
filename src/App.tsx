@@ -140,6 +140,22 @@ function App() {
     });
   }, [controller.assignAssetsToFolder, controller.folders]);
 
+  const moveAssetsToTrash = useCallback((assets: Asset[]) => {
+    void controller.trashAssets(assets.map((asset) => asset.id));
+    setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已移到回收站` : `${assets.length} 项资源已移到回收站` });
+  }, [controller.trashAssets]);
+
+  const permanentlyDeleteAssets = useCallback((assets: Asset[]) => {
+    if (!window.confirm(assets.length === 1 ? `将永久删除“${assets[0].displayName}”，此操作无法撤销。` : `将永久删除所选 ${assets.length} 项资源，此操作无法撤销。`)) return;
+    void controller.purgeAssets(assets.map((asset) => asset.id));
+    setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已永久删除` : `${assets.length} 项资源已永久删除` });
+  }, [controller.purgeAssets]);
+
+  const deleteAssets = useCallback((assets: Asset[]) => {
+    if (assets.every((asset) => Boolean(asset.deletedAt))) permanentlyDeleteAssets(assets);
+    else moveAssetsToTrash(assets);
+  }, [moveAssetsToTrash, permanentlyDeleteAssets]);
+
   const inspectIntegrity = async () => {
     setLibraryMenuOpen(false);
     if (!isTauriRuntime()) {
@@ -257,6 +273,7 @@ function App() {
             onOpen={setFocusAsset}
             onToggleFavorite={(asset) => void controller.updateAsset(asset.id, { favorite: !asset.favorite })}
             onAssignAssets={assignAssetsToFolder}
+            onDelete={deleteAssets}
           />
         </main>
 
@@ -268,9 +285,9 @@ function App() {
             onUpdate={(assetIds, patch) => void controller.updateAssets(assetIds, patch)}
             onCreateTag={controller.createTag}
             onOpenExternal={(asset) => void openExternal(asset)}
-            onTrash={(assets) => { void controller.trashAssets(assets.map((asset) => asset.id)); setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已移到回收站` : `${assets.length} 项资源已移到回收站` }); }}
+            onTrash={moveAssetsToTrash}
             onRestore={(assets) => { void controller.restoreAssets(assets.map((asset) => asset.id)); setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已恢复` : `${assets.length} 项资源已恢复` }); }}
-            onPurge={(assets) => { if (window.confirm(assets.length === 1 ? `将永久删除“${assets[0].displayName}”，此操作无法撤销。` : `将永久删除所选 ${assets.length} 项资源，此操作无法撤销。`)) { void controller.purgeAssets(assets.map((asset) => asset.id)); setToast({ kind: "success", message: assets.length === 1 ? `“${assets[0].displayName}”已永久删除` : `${assets.length} 项资源已永久删除` }); } }}
+            onPurge={permanentlyDeleteAssets}
             onExport={(assets) => void exportSelection(assets)}
           />
         ) : null}

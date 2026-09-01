@@ -41,6 +41,22 @@ describe("Libr desktop shell", () => {
     expect(await screen.findByText(/导入入口工作正常/)).toBeInTheDocument();
   });
 
+  it("moves assets to trash from a red context-menu action", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const card = screen.getAllByText("DSC_0876.jpg")[0].closest(".asset-card")!;
+
+    expect(fireEvent.contextMenu(card, { clientX: 240, clientY: 180 })).toBe(false);
+    const menu = screen.getByRole("menu", { name: "资源操作" });
+    const deleteItem = within(menu).getByRole("menuitem", { name: "移到回收站" });
+    expect(deleteItem).toHaveClass("is-danger");
+
+    await user.click(deleteItem);
+    expect(screen.queryByRole("menu", { name: "资源操作" })).not.toBeInTheDocument();
+    expect(screen.queryByText("DSC_0876.jpg")).not.toBeInTheDocument();
+    expect(await screen.findByText("“DSC_0876.jpg”已移到回收站")).toBeInTheDocument();
+  });
+
   it("creates folders and applies compound asset filters", async () => {
     const user = userEvent.setup();
     render(<App />);
