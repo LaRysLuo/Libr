@@ -25,7 +25,7 @@ const createProps = () => ({
   searchText: "",
   sortBy: "importedAt" as const,
   viewMode: "grid" as const,
-  deleteOriginals: false,
+  importMode: "map" as const,
   onSearch: vi.fn(),
   onImportFiles: vi.fn(),
   onImportFolder: vi.fn(),
@@ -51,7 +51,7 @@ describe("AppHeader import settings", () => {
     await user.click(screen.getByRole("button", { name: "显示导入选项" }));
     const menu = screen.getByRole("menu", { name: "导入选项" });
     expect(within(menu).queryByRole("menuitemcheckbox")).not.toBeInTheDocument();
-    expect(within(menu).getByText("当前：保留原文件")).toBeInTheDocument();
+    expect(within(menu).getByText("当前：映射原文件（省空间）")).toBeInTheDocument();
     await user.click(within(menu).getByRole("menuitem", { name: /导入配置/ }));
 
     expect(props.onImportSettings).toHaveBeenCalledOnce();

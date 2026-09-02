@@ -4,6 +4,7 @@ import {
   CirclePlus,
   Clock3,
   CopyCheck,
+  ExternalLink,
   Folder as FolderIcon,
   FolderOpen,
   Heart,
@@ -14,13 +15,14 @@ import {
   LockKeyholeOpen,
   MoreHorizontal,
   Plus,
+  RadioTower,
   ShieldOff,
   Sparkles,
   Tag,
   Trash2,
 } from "lucide-react";
 import { memo, useMemo, useRef, useState } from "react";
-import type { Folder, NavigationCounts, SmartFolder } from "../types";
+import type { DiscoveredLanShare, Folder, NavigationCounts, SmartFolder } from "../types";
 import type { NavigationScope } from "../hooks/useLibraryController";
 import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
 import { hasDraggedAssets, readDraggedAssetIds } from "../lib/drag";
@@ -35,6 +37,8 @@ interface SidebarProps {
   onFolderSecurity: (folder: Folder, action: "encrypt" | "unlock" | "lock" | "remove") => void;
   onShareFolder: (folder: Folder) => void;
   sharedFolderId?: string | null;
+  discoveredLanShares: DiscoveredLanShare[];
+  onOpenLanShare: (share: DiscoveredLanShare) => void;
   onCreateFolder: (name: string) => Promise<void> | void;
   onCreateSmartFolder: (name: string) => Promise<void> | void;
   onAssignAssets: (assetIds: string[], folderId: string) => Promise<void> | void;
@@ -90,7 +94,7 @@ function InlineCreate({ placeholder, onCancel, onCreate }: { placeholder: string
   return <form className="sidebar-inline-create" onSubmit={(event) => { event.preventDefault(); if (value.trim()) void Promise.resolve(onCreate(value)).then(onCancel); }}><input autoFocus aria-label={placeholder} placeholder={placeholder} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") onCancel(); }} /><button type="submit" disabled={!value.trim()}>添加</button></form>;
 }
 
-export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenFolder, onFolderSecurity, onShareFolder, sharedFolderId, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
+export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenFolder, onFolderSecurity, onShareFolder, sharedFolderId, discoveredLanShares, onOpenLanShare, onCreateFolder, onCreateSmartFolder, onAssignAssets }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [creating, setCreating] = useState<"folder" | "smart" | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
@@ -220,6 +224,41 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenF
             onClick={() => onScope(`smart:${folder.id}`)}
           />
         ))}
+      </section>
+
+      <section className="sidebar-section lan-discovery-section" aria-label="局域网分享">
+        <div className="sidebar-section-title">
+          <span>局域网分享</span>
+          <span className="lan-discovery-status" aria-label={`发现 ${discoveredLanShares.length} 个局域网分享`}>
+            <i />{discoveredLanShares.length}
+          </span>
+        </div>
+        {discoveredLanShares.length ? (
+          <div className="lan-share-list">
+            {discoveredLanShares.map((share) => (
+              <button
+                key={share.id}
+                type="button"
+                className="lan-share-row"
+                aria-label={`打开 ${share.deviceName} 分享的 ${share.folderName}`}
+                title={share.url}
+                onClick={() => onOpenLanShare(share)}
+              >
+                <span className="lan-share-icon"><RadioTower size={15} /></span>
+                <span className="lan-share-copy">
+                  <strong>{share.folderName}</strong>
+                  <small>{share.deviceName} · {share.permission === "manage" ? "可管理" : "仅查看"}</small>
+                </span>
+                <ExternalLink className="lan-share-open-icon" size={13} />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="lan-share-empty">
+            <RadioTower size={15} />
+            <span>正在查找同一网络中的分享…</span>
+          </div>
+        )}
       </section>
 
       <div className="sidebar-spacer" />

@@ -1,7 +1,7 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { mockAssets, mockFolders, mockSmartFolders } from "../data/mockAssets";
 import { assetApi, assetProtocolUrl, isTauriRuntime, libraryApi, organizationApi } from "../lib/tauri";
-import type { Asset, AssetKind, AssetPatch, Folder, JobProgress, LibraryInfo, NavigationCounts, SearchQuery, SmartFolder, Tag } from "../types";
+import type { Asset, AssetKind, AssetPatch, Folder, ImportMode, JobProgress, LibraryInfo, NavigationCounts, SearchQuery, SmartFolder, Tag } from "../types";
 
 const demoLibrary: LibraryInfo = {
   id: "demo-library",
@@ -380,7 +380,7 @@ export function useLibraryController() {
     setSmartFolders([]);
   }, []);
 
-  const importPaths = useCallback(async (paths: string[], folderId?: string, deleteOriginals = false) => {
+  const importPaths = useCallback(async (paths: string[], folderId?: string, importMode: ImportMode = "map") => {
     setJobProgress({
       jobId: `pending-import-${Date.now()}`,
       kind: "import",
@@ -393,7 +393,7 @@ export function useLibraryController() {
     try {
       let result;
       try {
-        result = await assetApi.import(paths, folderId, deleteOriginals);
+        result = await assetApi.import(paths, folderId, importMode);
       } catch (reason) {
         setJobProgress((current) => current?.kind === "import" ? {
           ...current,

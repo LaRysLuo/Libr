@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -20,8 +20,10 @@ use crate::{
     models::{Asset, AssetKind, AssetPatch, Folder, LibraryInfo, SearchQuery, SmartFolder, Tag},
 };
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 pub const APPLICATION_ID: i64 = 0x4C49_4252;
+const EMBEDDED_COVER_SCAN_KIND: &str = "embedded-cover-v1";
+const MAX_EMBEDDED_COVER_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct LibrarySession {
     pub conn: Connection,
@@ -130,6 +132,17 @@ fn migrate_schema(conn: &Connection, from_version: i64) -> LibrResult<()> {
              COMMIT;",
         )?;
     }
+    if from_version < 3 {
+        let has_external_path: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('blobs') WHERE name = 'external_path')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_external_path {
+            conn.execute("ALTER TABLE blobs ADD COLUMN external_path TEXT", [])?;
+        }
+        conn.pragma_update(None, "user_version", 3)?;
+    }
     Ok(())
 }
 
@@ -146,7 +159,8 @@ fn initialize_schema(conn: &mut Connection, name: &str) -> LibrResult<()> {
            sha256 TEXT NOT NULL UNIQUE,
            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
            mime TEXT NOT NULL,
-           data BLOB NOT NULL
+           data BLOB NOT NULL,
+           external_path TEXT
          );
          CREATE TABLE assets (
            id TEXT PRIMARY KEY,
@@ -282,12 +296,11 @@ pub fn library_info(session: &LibrarySession) -> LibrResult<LibraryInfo> {
                 ))
             },
         )?;
-    let total_bytes: i64 =
-        session
-            .conn
-            .query_row("SELECT COALESCE(SUM(byte_size), 0) FROM blobs", [], |row| {
-                row.get(0)
-            })?;
+    let total_bytes: i64 = session.conn.query_row(
+        "SELECT COALESCE(SUM(length(data)), 0) FROM blobs",
+        [],
+        |row| row.get(0),
+    )?;
     let schema_version: i64 = session
         .conn
         .pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -516,32 +529,133 @@ fn base_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
 }
 
 fn hydrate_assets(conn: &Connection, assets: &mut [Asset]) -> LibrResult<()> {
-    let mut tag_statement = conn.prepare(
-        "SELECT t.id, t.name, t.color FROM tags t JOIN asset_tags at ON at.tag_id = t.id WHERE at.asset_id = ?1 ORDER BY t.name COLLATE NOCASE",
-    )?;
-    let mut folder_statement =
-        conn.prepare("SELECT folder_id FROM asset_folders WHERE asset_id = ?1")?;
+    const HYDRATE_BATCH_SIZE: usize = 500;
+    if assets.is_empty() {
+        return Ok(());
+    }
+
+    let indexes: HashMap<String, usize> = assets
+        .iter()
+        .enumerate()
+        .map(|(index, asset)| (asset.id.clone(), index))
+        .collect();
+    let asset_ids: Vec<String> = assets.iter().map(|asset| asset.id.clone()).collect();
+    let mut assets_with_previews: HashSet<String> = HashSet::new();
+    for asset in assets.iter_mut() {
+        asset.tags.clear();
+        asset.folder_ids.clear();
+    }
+
+    for ids in asset_ids.chunks(HYDRATE_BATCH_SIZE) {
+        let placeholders = vec!["?"; ids.len()].join(",");
+
+        let mut tag_statement = conn.prepare(&format!(
+            "SELECT at.asset_id, t.id, t.name, t.color
+             FROM asset_tags at JOIN tags t ON t.id = at.tag_id
+             WHERE at.asset_id IN ({placeholders})
+             ORDER BY at.asset_id, t.name COLLATE NOCASE"
+        ))?;
+        let tags = tag_statement.query_map(params_from_iter(ids), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Tag {
+                    id: row.get(1)?,
+                    name: row.get(2)?,
+                    color: row.get(3)?,
+                },
+            ))
+        })?;
+        for row in tags {
+            let (asset_id, tag) = row?;
+            if let Some(index) = indexes.get(&asset_id) {
+                assets[*index].tags.push(tag);
+            }
+        }
+
+        let mut folder_statement = conn.prepare(&format!(
+            "SELECT asset_id, folder_id FROM asset_folders
+             WHERE asset_id IN ({placeholders})"
+        ))?;
+        let folders = folder_statement.query_map(params_from_iter(ids), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in folders {
+            let (asset_id, folder_id) = row?;
+            if let Some(index) = indexes.get(&asset_id) {
+                assets[*index].folder_ids.push(folder_id);
+            }
+        }
+
+        let mut preview_statement = conn.prepare(&format!(
+            "SELECT asset_id FROM previews
+             WHERE kind = 'thumbnail' AND asset_id IN ({placeholders})"
+        ))?;
+        let previews =
+            preview_statement.query_map(params_from_iter(ids), |row| row.get::<_, String>(0))?;
+        for preview in previews {
+            assets_with_previews.insert(preview?);
+        }
+    }
+
     for asset in assets {
-        asset.tags = tag_statement
-            .query_map([&asset.id], |row| {
-                Ok(Tag {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    color: row.get(2)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        asset.folder_ids = folder_statement
-            .query_map([&asset.id], |row| row.get(0))?
-            .collect::<Result<Vec<String>, _>>()?;
-        let has_preview: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM previews WHERE asset_id = ?1 AND kind = 'thumbnail')",
-            [&asset.id],
-            |row| row.get(0),
-        )?;
-        if !has_preview {
+        if !assets_with_previews.contains(&asset.id) {
             asset.preview_url = None;
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn backfill_embedded_video_previews(session: &LibrarySession) -> LibrResult<()> {
+    if session.read_only {
+        return Ok(());
+    }
+    let candidates = {
+        let mut statement = session.conn.prepare(
+            "SELECT a.id, b.rowid
+             FROM assets a JOIN blobs b ON b.id = a.blob_id
+             WHERE a.kind = 'video'
+               AND NOT EXISTS (
+                   SELECT 1 FROM previews p
+                   WHERE p.asset_id = a.id AND p.kind = ?1
+               )",
+        )?;
+        let rows = statement
+            .query_map([EMBEDDED_COVER_SCAN_KIND], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut covers: HashMap<i64, Option<(Vec<u8>, u32, u32, String)>> = HashMap::new();
+    for (asset_id, blob_rowid) in candidates {
+        let preview = if let Some(cached) = covers.get(&blob_rowid) {
+            cached.clone()
+        } else {
+            let extracted = session
+                .conn
+                .blob_open("main", "blobs", "data", blob_rowid, true)
+                .ok()
+                .and_then(|mut blob| generate_embedded_video_preview(&mut blob).ok());
+            covers.insert(blob_rowid, extracted.clone());
+            extracted
+        };
+        if let Some((data, width, height, dominant_color)) = preview {
+            session.conn.execute(
+                "INSERT OR IGNORE INTO previews(asset_id, kind, width, height, mime, data)
+                 VALUES (?1, 'thumbnail', ?2, ?3, 'image/jpeg', ?4)",
+                params![asset_id, width, height, data],
+            )?;
+            session.conn.execute(
+                "UPDATE assets SET dominant_color = COALESCE(dominant_color, ?1) WHERE id = ?2",
+                params![dominant_color, asset_id],
+            )?;
+        }
+        session.conn.execute(
+            "INSERT INTO previews(asset_id, kind, width, height, mime, data)
+             VALUES (?1, ?2, NULL, NULL, 'application/x-libr-marker', x'')",
+            params![asset_id, EMBEDDED_COVER_SCAN_KIND],
+        )?;
     }
     Ok(())
 }
@@ -550,6 +664,23 @@ pub fn import_file(
     session: &mut LibrarySession,
     path: &Path,
     folder_id: Option<&str>,
+) -> LibrResult<ImportOneResult> {
+    import_file_with_storage(session, path, folder_id, false)
+}
+
+pub fn import_mapped_file(
+    session: &mut LibrarySession,
+    path: &Path,
+    folder_id: Option<&str>,
+) -> LibrResult<ImportOneResult> {
+    import_file_with_storage(session, path, folder_id, true)
+}
+
+fn import_file_with_storage(
+    session: &mut LibrarySession,
+    path: &Path,
+    folder_id: Option<&str>,
+    mapped: bool,
 ) -> LibrResult<ImportOneResult> {
     if session.read_only {
         return Err(LibrError::ReadOnly);
@@ -595,34 +726,41 @@ pub fn import_file(
         .ok()
         .map(system_time_to_rfc3339)
         .unwrap_or_else(|| imported_at.clone());
-    let preview = if kind == AssetKind::Image {
-        generate_image_preview(path).ok()
-    } else {
-        None
+    let preview = match kind {
+        AssetKind::Image => generate_image_preview(path).ok(),
+        AssetKind::Video => File::open(path)
+            .ok()
+            .and_then(|mut file| generate_embedded_video_preview(&mut file).ok()),
+        _ => None,
     };
-    let (width, height, dominant_color) = preview
-        .as_ref()
-        .map(|(_, width, height, color)| {
-            (
-                Some(*width as i64),
-                Some(*height as i64),
-                Some(color.clone()),
-            )
-        })
-        .unwrap_or((None, None, None));
+    let (width, height, dominant_color) = match (kind.clone(), preview.as_ref()) {
+        (AssetKind::Image, Some((_, width, height, color))) => (
+            Some(*width as i64),
+            Some(*height as i64),
+            Some(color.clone()),
+        ),
+        (AssetKind::Video, Some((_, _, _, color))) => (None, None, Some(color.clone())),
+        _ => (None, None, None),
+    };
 
     let blob_id = Uuid::new_v4().to_string();
     let asset_id = Uuid::new_v4().to_string();
     let transaction = session.conn.transaction()?;
-    transaction.execute(
-        "INSERT INTO blobs(id, sha256, byte_size, mime, data) VALUES (?1, ?2, ?3, ?4, zeroblob(?3))",
-        params![blob_id, sha256, byte_size, mime],
-    )?;
-    let blob_rowid: i64 =
-        transaction.query_row("SELECT rowid FROM blobs WHERE id = ?1", [&blob_id], |row| {
-            row.get(0)
-        })?;
-    {
+    if mapped {
+        let external_path = fs::canonicalize(path)?.to_string_lossy().into_owned();
+        transaction.execute(
+            "INSERT INTO blobs(id, sha256, byte_size, mime, data, external_path) VALUES (?1, ?2, ?3, ?4, x'', ?5)",
+            params![blob_id, sha256, byte_size, mime, external_path],
+        )?;
+    } else {
+        transaction.execute(
+            "INSERT INTO blobs(id, sha256, byte_size, mime, data) VALUES (?1, ?2, ?3, ?4, zeroblob(?3))",
+            params![blob_id, sha256, byte_size, mime],
+        )?;
+        let blob_rowid: i64 =
+            transaction.query_row("SELECT rowid FROM blobs WHERE id = ?1", [&blob_id], |row| {
+                row.get(0)
+            })?;
         let mut source = File::open(path)?;
         let mut target = transaction.blob_open("main", "blobs", "data", blob_rowid, false)?;
         std::io::copy(&mut source, &mut target)?;
@@ -642,6 +780,13 @@ pub fn import_file(
         transaction.execute(
             "INSERT INTO previews(asset_id, kind, width, height, mime, data) VALUES (?1, 'thumbnail', ?2, ?3, 'image/jpeg', ?4)",
             params![asset_id, preview_width, preview_height, data],
+        )?;
+    }
+    if kind == AssetKind::Video {
+        transaction.execute(
+            "INSERT INTO previews(asset_id, kind, width, height, mime, data)
+             VALUES (?1, ?2, NULL, NULL, 'application/x-libr-marker', x'')",
+            params![asset_id, EMBEDDED_COVER_SCAN_KIND],
         )?;
     }
     transaction.execute(
@@ -1210,16 +1355,52 @@ pub fn stream_asset_to_writer(
     asset_id: &str,
     mut writer: impl Write,
 ) -> LibrResult<String> {
-    let (rowid, filename): (i64, String) = session.conn.query_row(
-        "SELECT b.rowid, a.display_name FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1",
+    let external_path_column = if schema_version(&session.conn)? >= 3 {
+        "b.external_path"
+    } else {
+        "NULL"
+    };
+    let (rowid, filename, external_path): (i64, String, Option<String>) = session.conn.query_row(
+        &format!("SELECT b.rowid, a.display_name, {external_path_column} FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1"),
         [asset_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?.ok_or(LibrError::AssetNotFound)?;
+    if let Some(external_path) = external_path {
+        let mut source = File::open(external_path)?;
+        std::io::copy(&mut source, &mut writer)?;
+        return Ok(filename);
+    }
     let mut blob = session
         .conn
         .blob_open("main", "blobs", "data", rowid, true)?;
     std::io::copy(&mut blob, &mut writer)?;
     Ok(filename)
+}
+
+pub fn mapped_asset_path(session: &LibrarySession, asset_id: &str) -> LibrResult<Option<PathBuf>> {
+    if schema_version(&session.conn)? < 3 {
+        return Ok(None);
+    }
+    let external_path: Option<String> = session
+        .conn
+        .query_row(
+            "SELECT b.external_path FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1",
+            [asset_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(LibrError::AssetNotFound)?;
+    let Some(external_path) = external_path else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(external_path);
+    if !path.is_file() {
+        return Err(LibrError::Other(format!(
+            "映射的原文件不存在：{}",
+            path.to_string_lossy()
+        )));
+    }
+    Ok(Some(path))
 }
 
 pub fn stream_asset_preview_to_writer(
@@ -1283,11 +1464,27 @@ pub fn protocol_blob(
         let to = (from + length).min(data.len());
         return Ok((data[from..to].to_vec(), mime, total));
     }
-    let (rowid, mime, total): (i64, String, i64) = session.conn.query_row(
-        "SELECT b.rowid, a.mime, b.byte_size FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1",
+    let external_path_column = if schema_version(&session.conn)? >= 3 {
+        "b.external_path"
+    } else {
+        "NULL"
+    };
+    let (rowid, mime, stored_total, external_path): (i64, String, i64, Option<String>) = session.conn.query_row(
+        &format!("SELECT b.rowid, a.mime, b.byte_size, {external_path_column} FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1"),
         [asset_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).optional()?.ok_or(LibrError::AssetNotFound)?;
+    if let Some(external_path) = external_path {
+        let mut file = File::open(external_path)?;
+        let total = file.metadata()?.len();
+        file.seek(SeekFrom::Start(start))?;
+        let available = total.saturating_sub(start);
+        let read_length = usize::try_from(available.min(length as u64)).unwrap_or(0);
+        let mut buffer = vec![0u8; read_length];
+        file.read_exact(&mut buffer)?;
+        return Ok((buffer, mime, total));
+    }
+    let total = stored_total;
     let blob = session
         .conn
         .blob_open("main", "blobs", "data", rowid, true)?;
@@ -1310,11 +1507,22 @@ pub fn protocol_metadata(
             |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)),
         ).optional()?.ok_or(LibrError::AssetNotFound);
     }
-    session.conn.query_row(
-        "SELECT a.mime, b.byte_size FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1",
+    let external_path_column = if schema_version(&session.conn)? >= 3 {
+        "b.external_path"
+    } else {
+        "NULL"
+    };
+    let (mime, stored_total, external_path): (String, i64, Option<String>) = session.conn.query_row(
+        &format!("SELECT a.mime, b.byte_size, {external_path_column} FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1"),
         [asset_id],
-        |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)),
-    ).optional()?.ok_or(LibrError::AssetNotFound)
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?.ok_or(LibrError::AssetNotFound)?;
+    let total = if let Some(external_path) = external_path {
+        fs::metadata(external_path)?.len()
+    } else {
+        stored_total.max(0) as u64
+    };
+    Ok((mime, total))
 }
 
 fn hash_file(path: &Path) -> LibrResult<String> {
@@ -1331,8 +1539,15 @@ fn hash_file(path: &Path) -> LibrResult<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn schema_version(conn: &Connection) -> LibrResult<i64> {
+    Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+}
+
 fn generate_image_preview(path: &Path) -> LibrResult<(Vec<u8>, u32, u32, String)> {
-    let image = image::open(path)?;
+    generate_preview(image::open(path)?)
+}
+
+fn generate_preview(image: image::DynamicImage) -> LibrResult<(Vec<u8>, u32, u32, String)> {
     let width = image.width();
     let height = image.height();
     let color_pixel = image
@@ -1348,6 +1563,119 @@ fn generate_image_preview(path: &Path) -> LibrResult<(Vec<u8>, u32, u32, String)
     let mut bytes = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgb8(thumbnail).write_to(&mut bytes, image::ImageFormat::Jpeg)?;
     Ok((bytes.into_inner(), width, height, dominant_color))
+}
+
+#[derive(Debug)]
+struct Mp4BoxHeader {
+    kind: [u8; 4],
+    payload_start: u64,
+    end: u64,
+}
+
+fn read_mp4_box_header(
+    reader: &mut (impl Read + Seek),
+    start: u64,
+    range_end: u64,
+) -> std::io::Result<Option<Mp4BoxHeader>> {
+    if range_end.saturating_sub(start) < 8 {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(start))?;
+    let mut header = [0u8; 8];
+    reader.read_exact(&mut header)?;
+    let size32 = u32::from_be_bytes(header[..4].try_into().unwrap());
+    let kind = header[4..8].try_into().unwrap();
+    let (size, header_size) = match size32 {
+        0 => (range_end - start, 8),
+        1 => {
+            if range_end.saturating_sub(start) < 16 {
+                return Ok(None);
+            }
+            let mut extended = [0u8; 8];
+            reader.read_exact(&mut extended)?;
+            (u64::from_be_bytes(extended), 16)
+        }
+        value => (u64::from(value), 8),
+    };
+    let Some(end) = start.checked_add(size) else {
+        return Ok(None);
+    };
+    if size < header_size || end > range_end {
+        return Ok(None);
+    }
+    Ok(Some(Mp4BoxHeader {
+        kind,
+        payload_start: start + header_size,
+        end,
+    }))
+}
+
+fn extract_cover_data(
+    reader: &mut (impl Read + Seek),
+    start: u64,
+    end: u64,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut position = start;
+    while let Some(header) = read_mp4_box_header(reader, position, end)? {
+        if header.kind == *b"data" {
+            let payload_size = header.end.saturating_sub(header.payload_start);
+            if (9..=MAX_EMBEDDED_COVER_BYTES + 8).contains(&payload_size) {
+                reader.seek(SeekFrom::Start(header.payload_start + 8))?;
+                let mut data = vec![0; (payload_size - 8) as usize];
+                reader.read_exact(&mut data)?;
+                return Ok(Some(data));
+            }
+        }
+        if header.end <= position {
+            break;
+        }
+        position = header.end;
+    }
+    Ok(None)
+}
+
+fn find_mp4_cover(
+    reader: &mut (impl Read + Seek),
+    start: u64,
+    end: u64,
+    depth: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    if depth > 8 {
+        return Ok(None);
+    }
+    let mut position = start;
+    while let Some(header) = read_mp4_box_header(reader, position, end)? {
+        if header.kind == *b"covr" {
+            if let Some(data) = extract_cover_data(reader, header.payload_start, header.end)? {
+                return Ok(Some(data));
+            }
+        } else if header.kind == *b"moov"
+            || header.kind == *b"udta"
+            || header.kind == *b"meta"
+            || header.kind == *b"ilst"
+        {
+            let child_start = header.payload_start + if header.kind == *b"meta" { 4 } else { 0 };
+            if child_start <= header.end {
+                if let Some(data) = find_mp4_cover(reader, child_start, header.end, depth + 1)? {
+                    return Ok(Some(data));
+                }
+            }
+        }
+        if header.end <= position {
+            break;
+        }
+        position = header.end;
+    }
+    Ok(None)
+}
+
+fn generate_embedded_video_preview(
+    reader: &mut (impl Read + Seek),
+) -> LibrResult<(Vec<u8>, u32, u32, String)> {
+    let length = reader.seek(SeekFrom::End(0))?;
+    let cover = find_mp4_cover(reader, 0, length, 0)?
+        .ok_or_else(|| LibrError::Other("视频没有内嵌封面".into()))?;
+    generate_preview(image::load_from_memory(&cover)?)
 }
 
 fn classify_asset(extension: &str, mime: &str) -> AssetKind {
@@ -1421,6 +1749,37 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn mp4_box(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(payload.len() + 8).unwrap();
+        let mut bytes = Vec::with_capacity(size as usize);
+        bytes.extend_from_slice(&size.to_be_bytes());
+        bytes.extend_from_slice(&kind);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn mp4_with_embedded_cover() -> Vec<u8> {
+        let cover = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            12,
+            8,
+            image::Rgb([214, 72, 118]),
+        ));
+        let mut encoded = Cursor::new(Vec::new());
+        cover
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let mut data_payload = vec![0, 0, 0, 14, 0, 0, 0, 0];
+        data_payload.extend_from_slice(&encoded.into_inner());
+        let data = mp4_box(*b"data", &data_payload);
+        let covr = mp4_box(*b"covr", &data);
+        let ilst = mp4_box(*b"ilst", &covr);
+        let mut meta_payload = vec![0, 0, 0, 0];
+        meta_payload.extend_from_slice(&ilst);
+        let meta = mp4_box(*b"meta", &meta_payload);
+        let udta = mp4_box(*b"udta", &meta);
+        mp4_box(*b"moov", &udta)
+    }
+
     #[test]
     fn creates_single_file_library_with_expected_identity() {
         let temp = tempdir().unwrap();
@@ -1448,6 +1807,103 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0))
             .unwrap();
         assert_eq!(blob_count, 1);
+    }
+
+    #[test]
+    fn mapped_import_keeps_content_outside_the_library() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("mapped.libr");
+        let source = temp.path().join("large.txt");
+        fs::write(&source, "external bytes").unwrap();
+        let mut session = create_library(&path, "mapped").unwrap();
+
+        let imported = import_mapped_file(&mut session, &source, None)
+            .unwrap()
+            .asset;
+        let (embedded_bytes, external_path): (i64, Option<String>) = session
+            .conn
+            .query_row(
+                "SELECT length(b.data), b.external_path FROM assets a JOIN blobs b ON b.id = a.blob_id WHERE a.id = ?1",
+                [&imported.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(embedded_bytes, 0);
+        assert_eq!(
+            external_path.map(PathBuf::from),
+            Some(fs::canonicalize(&source).unwrap())
+        );
+        assert_eq!(library_info(&session).unwrap().total_bytes, 0);
+
+        let mut exported = Vec::new();
+        stream_asset_to_writer(&session, &imported.id, &mut exported).unwrap();
+        assert_eq!(exported, b"external bytes");
+
+        fs::remove_file(&source).unwrap();
+        assert!(stream_asset_to_writer(&session, &imported.id, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn streams_embedded_assets_from_a_read_only_v2_schema() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("legacy-v2.libr");
+        let source = temp.path().join("legacy.txt");
+        fs::write(&source, "legacy bytes").unwrap();
+        let mut session = create_library(&path, "legacy").unwrap();
+        let imported = import_file(&mut session, &source, None).unwrap().asset;
+        session
+            .conn
+            .execute_batch("ALTER TABLE blobs DROP COLUMN external_path; PRAGMA user_version = 2;")
+            .unwrap();
+
+        let mut streamed = Vec::new();
+        stream_asset_to_writer(&session, &imported.id, &mut streamed).unwrap();
+        assert_eq!(streamed, b"legacy bytes");
+        assert_eq!(mapped_asset_path(&session, &imported.id).unwrap(), None);
+    }
+
+    #[test]
+    fn imports_and_backfills_embedded_video_covers() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("covers.libr");
+        let source = temp.path().join("内嵌封面.mp4");
+        fs::write(&source, mp4_with_embedded_cover()).unwrap();
+        let mut session = create_library(&path, "covers").unwrap();
+
+        let imported = import_file(&mut session, &source, None).unwrap().asset;
+        assert!(imported.preview_url.is_some());
+        assert_eq!(imported.width, None);
+        assert_eq!(imported.height, None);
+        let (preview, preview_width): (Vec<u8>, i64) = session
+            .conn
+            .query_row(
+                "SELECT data, width FROM previews WHERE asset_id = ?1 AND kind = 'thumbnail'",
+                [&imported.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preview_width, 12);
+        assert!(image::load_from_memory(&preview).is_ok());
+
+        session
+            .conn
+            .execute("DELETE FROM previews WHERE asset_id = ?1", [&imported.id])
+            .unwrap();
+        backfill_embedded_video_previews(&session).unwrap();
+        let restored = get_asset(&session, &imported.id).unwrap();
+        assert!(restored.preview_url.is_some());
+        let kinds: Vec<String> = session
+            .conn
+            .prepare("SELECT kind FROM previews WHERE asset_id = ?1 ORDER BY kind")
+            .unwrap()
+            .query_map([&imported.id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            kinds,
+            vec![EMBEDDED_COVER_SCAN_KIND.to_owned(), "thumbnail".to_owned()]
+        );
     }
 
     #[test]

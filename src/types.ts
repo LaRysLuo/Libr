@@ -8,6 +8,8 @@ export type AssetKind =
   | "archive"
   | "other";
 
+export type ImportMode = "map" | "copy" | "move";
+
 export interface LibraryInfo {
   id: string;
   name: string;
@@ -174,4 +176,12 @@ export interface LanShareInfo {
   permission?: "readOnly" | "manage" | null;
   url?: string | null;
   port?: number | null;
+}
+
+export interface DiscoveredLanShare {
+  id: string;
+  deviceName: string;
+  folderName: string;
+  permission: "readOnly" | "manage";
+  url: string;
 }

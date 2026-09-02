@@ -55,6 +55,10 @@ pub fn run() {
                     }
                 }
             }
+            lan_share::start_discovery(
+                app.handle().clone(),
+                app.state::<AppState>().inner().clone(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -93,6 +97,8 @@ pub fn run() {
             commands::lan_share_start,
             commands::lan_share_stop,
             commands::lan_share_status,
+            commands::lan_share_discovered,
+            commands::lan_share_open,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Libr");

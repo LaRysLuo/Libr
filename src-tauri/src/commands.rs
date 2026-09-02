@@ -12,8 +12,8 @@ use crate::{
     db,
     error::{LibrError, LibrResult},
     models::{
-        Asset, AssetPatch, FailedImport, Folder, ImportResult, JobProgress, LanShareInfo,
-        LibraryInfo, SearchQuery, SmartFolder, Tag,
+        Asset, AssetPatch, DiscoveredLanShare, FailedImport, Folder, ImportResult, JobProgress,
+        LanShareInfo, LibraryInfo, SearchQuery, SmartFolder, Tag,
     },
     preferences,
     state::AppState,
@@ -41,7 +41,17 @@ fn emit_progress(app: &AppHandle, progress: JobProgress) {
     let _ = app.emit("job-progress", progress);
 }
 
-fn collect_files(paths: &[String]) -> Vec<PathBuf> {
+fn library_storage_paths(library_path: &Path) -> HashSet<PathBuf> {
+    let mut paths = HashSet::from([library_path.to_path_buf()]);
+    let library = library_path.to_string_lossy();
+    for suffix in ["-journal", "-wal", "-shm"] {
+        paths.insert(PathBuf::from(format!("{library}{suffix}")));
+    }
+    paths
+}
+
+fn collect_files(paths: &[String], library_path: &Path) -> Vec<PathBuf> {
+    let excluded = library_storage_paths(library_path);
     let mut files = Vec::new();
     for raw_path in paths {
         let path = PathBuf::from(raw_path);
@@ -58,6 +68,7 @@ fn collect_files(paths: &[String]) -> Vec<PathBuf> {
             files.push(path);
         }
     }
+    files.retain(|path| !excluded.contains(path));
     files.sort();
     files.dedup();
     files
@@ -233,6 +244,16 @@ pub fn lan_share_status(state: State<'_, AppState>) -> LanShareInfo {
 }
 
 #[tauri::command]
+pub fn lan_share_discovered(state: State<'_, AppState>) -> Vec<DiscoveredLanShare> {
+    crate::lan_share::discovered_shares(state.inner())
+}
+
+#[tauri::command]
+pub fn lan_share_open(state: State<'_, AppState>, share_id: String) -> LibrResult<()> {
+    crate::lan_share::open_discovered_share(state.inner(), &share_id)
+}
+
+#[tauri::command]
 pub fn asset_list(state: State<'_, AppState>, query: SearchQuery) -> LibrResult<Vec<Asset>> {
     let guard = state.session.lock();
     let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
@@ -254,8 +275,13 @@ pub async fn asset_import(
     state: State<'_, AppState>,
     paths: Vec<String>,
     folder_id: Option<String>,
-    delete_originals: bool,
+    import_mode: String,
 ) -> LibrResult<ImportResult> {
+    if !matches!(import_mode.as_str(), "map" | "copy" | "move") {
+        return Err(LibrError::Other("不支持的导入模式".into()));
+    }
+    let delete_originals = import_mode == "move";
+    let map_external = import_mode == "map";
     if let Some(folder_id) = folder_id.as_deref() {
         let guard = state.session.lock();
         let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
@@ -283,7 +309,7 @@ pub async fn asset_import(
     let app_for_worker = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let files = collect_files(&paths);
+        let files = collect_files(&paths, &library_path);
         let total = files.len();
         let mut imported = Vec::new();
         let mut duplicates = 0usize;
@@ -332,7 +358,11 @@ pub async fn asset_import(
             let result = {
                 let mut guard = shared_state.session.lock();
                 let session = guard.as_mut().ok_or(LibrError::NoLibrary)?;
-                db::import_file(session, path, folder_id.as_deref())
+                if map_external {
+                    db::import_mapped_file(session, path, folder_id.as_deref())
+                } else {
+                    db::import_file(session, path, folder_id.as_deref())
+                }
             };
             match result {
                 Ok(result) => {
@@ -369,7 +399,6 @@ pub async fn asset_import(
                 message: None,
             },
         );
-        let _ = app_for_worker.emit("library-changed", "assets");
         Ok(ImportResult {
             job_id: job_id_for_worker,
             imported,
@@ -498,6 +527,10 @@ pub async fn asset_prepare_drag(
 
         for asset_id in &asset_ids {
             let asset = db::get_asset(session, asset_id)?;
+            if let Some(mapped_path) = db::mapped_asset_path(session, asset_id)? {
+                paths.push(mapped_path.to_string_lossy().into_owned());
+                continue;
+            }
             let asset_cache = library_cache.join(asset_id);
             fs::create_dir_all(&asset_cache)?;
             let destination = asset_cache.join(safe_drag_filename(&asset.display_name));
@@ -565,6 +598,10 @@ pub fn asset_open_external(
     let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
     let blocked = blocked_folder_ids(state.inner(), session)?;
     db::ensure_assets_accessible(session, std::slice::from_ref(&asset_id), &blocked)?;
+    if let Some(mapped_path) = db::mapped_asset_path(session, &asset_id)? {
+        opener::open(mapped_path).map_err(|error| LibrError::Other(error.to_string()))?;
+        return Ok(());
+    }
     let asset = db::get_asset(session, &asset_id)?;
     let destination = cache_root.join(asset.display_name.replace(['/', '\\'], "_"));
     let mut target = fs::File::create(&destination)?;
@@ -774,9 +811,27 @@ mod tests {
         fs::write(&root_file, b"root").unwrap();
         fs::write(&nested_file, b"nested").unwrap();
 
-        let files = collect_files(&[temporary.path().to_string_lossy().into_owned()]);
+        let library = temporary.path().join("library.libr");
+        let files = collect_files(&[temporary.path().to_string_lossy().into_owned()], &library);
 
         assert_eq!(files, vec![nested_file, root_file]);
+    }
+
+    #[test]
+    fn recursive_import_excludes_the_open_library_and_its_sidecars() {
+        let temporary = tempfile::tempdir().unwrap();
+        let library = temporary.path().join("library.libr");
+        let journal = temporary.path().join("library.libr-journal");
+        let wal = temporary.path().join("library.libr-wal");
+        let shm = temporary.path().join("library.libr-shm");
+        let source = temporary.path().join("source.mov");
+        for path in [&library, &journal, &wal, &shm, &source] {
+            fs::write(path, b"data").unwrap();
+        }
+
+        let files = collect_files(&[temporary.path().to_string_lossy().into_owned()], &library);
+
+        assert_eq!(files, vec![source]);
     }
 
     #[test]

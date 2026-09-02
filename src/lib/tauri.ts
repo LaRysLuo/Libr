@@ -3,7 +3,9 @@ import type {
   AssetPatch,
   Folder,
   ImportResult,
+  ImportMode,
   LibraryInfo,
+  DiscoveredLanShare,
   LanShareInfo,
   SearchQuery,
   SmartFolder,
@@ -35,8 +37,8 @@ export const libraryApi = {
 
 export const assetApi = {
   list: (query: SearchQuery) => call<Asset[]>("asset_list", { query }),
-  import: (paths: string[], folderId?: string, deleteOriginals = false) =>
-    call<ImportResult>("asset_import", { paths, folderId: folderId ?? null, deleteOriginals }),
+  import: (paths: string[], folderId?: string, importMode: ImportMode = "map") =>
+    call<ImportResult>("asset_import", { paths, folderId: folderId ?? null, importMode }),
   cancelImport: (jobId: string) => call<void>("asset_cancel_import", { jobId }),
   update: (assetId: string, patch: AssetPatch) => call<Asset>("asset_update", { assetId, patch }),
   trash: (assetIds: string[]) => call<void>("asset_trash", { assetIds }),
@@ -85,4 +87,6 @@ export const lanShareApi = {
   start: (folderId: string, allowEditing: boolean) =>
     call<LanShareInfo>("lan_share_start", { folderId, allowEditing }),
   stop: () => call<LanShareInfo>("lan_share_stop"),
+  discovered: () => call<DiscoveredLanShare[]>("lan_share_discovered"),
+  open: (shareId: string) => call<void>("lan_share_open", { shareId }),
 };

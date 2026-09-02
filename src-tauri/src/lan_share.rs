@@ -1,13 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,13 +16,36 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     db,
     error::{LibrError, LibrResult},
-    models::{Asset, AssetPatch, LanShareInfo, SearchQuery},
+    models::{Asset, AssetPatch, DiscoveredLanShare, LanShareInfo, SearchQuery},
     protocol,
     state::{AppState, LanShareRuntime},
 };
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_RANGE_BYTES: usize = 4 * 1024 * 1024;
+const DISCOVERY_PORT: u16 = 42137;
+const DISCOVERY_MAGIC: &[u8] = b"LIBR_SHARE_V1\n";
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(2);
+const DISCOVERY_EXPIRY: Duration = Duration::from_secs(7);
+const MAX_DISCOVERY_PACKET_BYTES: usize = 2 * 1024;
+
+#[derive(Clone, Debug)]
+struct Ipv4Interface {
+    name: String,
+    address: Ipv4Addr,
+    netmask: Ipv4Addr,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LanShareAnnouncement {
+    instance_id: String,
+    device_name: String,
+    folder_name: String,
+    permission: String,
+    port: u16,
+    token: String,
+}
 
 #[derive(Clone)]
 struct ShareConfig {
@@ -129,7 +152,7 @@ pub fn start(
     let info = LanShareInfo {
         active: true,
         folder_id: Some(folder_id),
-        folder_name: Some(folder_name),
+        folder_name: Some(folder_name.clone()),
         permission: Some(if allow_editing { "manage" } else { "readOnly" }.into()),
         url: Some(url),
         port: Some(port),
@@ -142,6 +165,18 @@ pub fn start(
             stop.store(true, Ordering::Release);
             LibrError::Other(format!("无法启动局域网共享：{error}"))
         })?;
+    let announcement = LanShareAnnouncement {
+        instance_id: state.lan_share_instance_id.clone(),
+        device_name: device_name(),
+        folder_name: folder_name.clone(),
+        permission: if allow_editing { "manage" } else { "readOnly" }.into(),
+        port,
+        token,
+    };
+    let advertiser_stop = stop.clone();
+    let _ = thread::Builder::new()
+        .name("libr-lan-advertiser".into())
+        .spawn(move || advertise_share(advertiser_stop, announcement));
     *state.lan_share.lock() = Some(LanShareRuntime {
         stop: stop.clone(),
         info: info.clone(),
@@ -150,15 +185,333 @@ pub fn start(
 }
 
 fn local_ipv4() -> String {
-    UdpSocket::bind("0.0.0.0:0")
-        .and_then(|socket| {
-            socket.connect("192.0.2.1:80")?;
-            socket.local_addr()
-        })
-        .map(|address| address.ip().to_string())
-        .ok()
-        .filter(|address| address != "0.0.0.0")
+    interface_ipv4_candidates()
+        .into_iter()
+        .max_by_key(|interface| local_ipv4_score(&interface.name, interface.address))
+        .map(|interface| interface.address)
+        .or_else(routed_local_ipv4)
+        .map(|address| address.to_string())
         .unwrap_or_else(|| "127.0.0.1".into())
+}
+
+fn local_ipv4_score(interface_name: &str, address: Ipv4Addr) -> i32 {
+    let address_score = if address.is_private() {
+        300
+    } else if is_shared_address(address) {
+        200
+    } else if address.is_link_local() {
+        100
+    } else {
+        0
+    };
+    let interface_score = if is_likely_physical_interface(interface_name) {
+        20
+    } else if is_likely_virtual_interface(interface_name) {
+        -20
+    } else {
+        0
+    };
+    address_score + interface_score
+}
+
+fn is_likely_physical_interface(name: &str) -> bool {
+    name.starts_with("en")
+        || name.starts_with("eth")
+        || name.starts_with("wlan")
+        || name.starts_with("wl")
+}
+
+fn is_likely_virtual_interface(name: &str) -> bool {
+    name.starts_with("utun")
+        || name.starts_with("tun")
+        || name.starts_with("tap")
+        || name.starts_with("docker")
+        || name.starts_with("veth")
+}
+
+#[cfg(unix)]
+fn interface_ipv4_candidates() -> Vec<Ipv4Interface> {
+    use std::{ffi::CStr, ptr};
+
+    let mut interfaces = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    let mut current = interfaces;
+    while !current.is_null() {
+        let interface = unsafe { &*current };
+        let is_up = interface.ifa_flags & libc::IFF_UP as u32 != 0;
+        let is_loopback = interface.ifa_flags & libc::IFF_LOOPBACK as u32 != 0;
+        let is_point_to_point = interface.ifa_flags & libc::IFF_POINTOPOINT as u32 != 0;
+        if is_up && !is_loopback && !is_point_to_point && !interface.ifa_addr.is_null() {
+            let socket_address = unsafe { &*interface.ifa_addr };
+            if socket_address.sa_family as i32 == libc::AF_INET {
+                let socket_address = unsafe { &*(interface.ifa_addr as *const libc::sockaddr_in) };
+                let address = Ipv4Addr::from(u32::from_be(socket_address.sin_addr.s_addr));
+                if is_usable_interface_address(address) {
+                    let name = unsafe { CStr::from_ptr(interface.ifa_name) }
+                        .to_string_lossy()
+                        .into_owned();
+                    let netmask = if interface.ifa_netmask.is_null() {
+                        Ipv4Addr::UNSPECIFIED
+                    } else {
+                        let netmask =
+                            unsafe { &*(interface.ifa_netmask as *const libc::sockaddr_in) };
+                        Ipv4Addr::from(u32::from_be(netmask.sin_addr.s_addr))
+                    };
+                    candidates.push(Ipv4Interface {
+                        name,
+                        address,
+                        netmask,
+                    });
+                }
+            }
+        }
+        current = interface.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(interfaces) };
+    candidates
+}
+
+#[cfg(not(unix))]
+fn interface_ipv4_candidates() -> Vec<Ipv4Interface> {
+    Vec::new()
+}
+
+fn routed_local_ipv4() -> Option<Ipv4Addr> {
+    // Multicast traffic normally follows the physical LAN route instead of a
+    // VPN's catch-all route. The second target keeps the previous fallback for
+    // platforms where multicast route probing is unavailable.
+    ["224.0.0.251:5353", "192.0.2.1:80"]
+        .into_iter()
+        .find_map(|target| {
+            UdpSocket::bind("0.0.0.0:0")
+                .and_then(|socket| {
+                    socket.connect(target)?;
+                    socket.local_addr()
+                })
+                .ok()
+                .and_then(|address| match address.ip() {
+                    IpAddr::V4(address) if is_usable_interface_address(address) => Some(address),
+                    _ => None,
+                })
+        })
+}
+
+fn is_usable_interface_address(address: Ipv4Addr) -> bool {
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_multicast()
+        && address != Ipv4Addr::BROADCAST
+        && !is_benchmark_address(address)
+}
+
+fn is_benchmark_address(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 198 && (18..=19).contains(&octets[1])
+}
+
+fn broadcast_targets() -> Vec<SocketAddr> {
+    let mut targets = HashSet::new();
+    for interface in interface_ipv4_candidates() {
+        if !is_local_network_address(IpAddr::V4(interface.address))
+            || interface.netmask.is_unspecified()
+        {
+            continue;
+        }
+        let broadcast =
+            Ipv4Addr::from(u32::from(interface.address) | !u32::from(interface.netmask));
+        if broadcast != interface.address && broadcast != Ipv4Addr::BROADCAST {
+            targets.insert(SocketAddr::from((broadcast, DISCOVERY_PORT)));
+        }
+    }
+    targets.insert(SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)));
+    targets.into_iter().collect()
+}
+
+fn advertise_share(stop: Arc<AtomicBool>, announcement: LanShareAnnouncement) {
+    let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+        return;
+    };
+    if socket.set_broadcast(true).is_err() {
+        return;
+    }
+    let Ok(payload) = serde_json::to_vec(&announcement) else {
+        return;
+    };
+    let mut packet = Vec::with_capacity(DISCOVERY_MAGIC.len() + payload.len());
+    packet.extend_from_slice(DISCOVERY_MAGIC);
+    packet.extend_from_slice(&payload);
+    if packet.len() > MAX_DISCOVERY_PACKET_BYTES {
+        return;
+    }
+
+    let targets = broadcast_targets();
+    while !stop.load(Ordering::Acquire) {
+        for target in &targets {
+            let _ = socket.send_to(&packet, target);
+        }
+        thread::sleep(DISCOVERY_INTERVAL);
+    }
+}
+
+pub fn start_discovery(app: AppHandle, state: AppState) {
+    let _ = thread::Builder::new()
+        .name("libr-lan-discovery".into())
+        .spawn(move || discover_shares(app, state));
+}
+
+fn discover_shares(app: AppHandle, state: AppState) {
+    let socket = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)) {
+        Ok(socket) => socket,
+        Err(error) => {
+            eprintln!("无法启动局域网分享发现：{error}");
+            return;
+        }
+    };
+    let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut buffer = [0_u8; MAX_DISCOVERY_PACKET_BYTES];
+
+    loop {
+        let mut changed = false;
+        match socket.recv_from(&mut buffer) {
+            Ok((length, peer)) => {
+                if let Some(share) =
+                    parse_discovery_packet(&buffer[..length], peer, &state.lan_share_instance_id)
+                {
+                    let mut discovered = state.discovered_lan_shares.lock();
+                    changed = discovered
+                        .get(&share.id)
+                        .map_or(true, |(current, _)| current != &share);
+                    discovered.insert(share.id.clone(), (share, Instant::now()));
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => {
+                eprintln!("局域网分享发现已停止：{error}");
+                break;
+            }
+        }
+
+        let now = Instant::now();
+        let mut discovered = state.discovered_lan_shares.lock();
+        let previous_length = discovered.len();
+        discovered.retain(|_, (_, last_seen)| now.duration_since(*last_seen) < DISCOVERY_EXPIRY);
+        changed |= previous_length != discovered.len();
+        drop(discovered);
+        if changed {
+            let _ = app.emit("lan-shares-changed", ());
+        }
+    }
+}
+
+fn parse_discovery_packet(
+    packet: &[u8],
+    peer: SocketAddr,
+    own_instance_id: &str,
+) -> Option<DiscoveredLanShare> {
+    let payload = packet.strip_prefix(DISCOVERY_MAGIC)?;
+    let announcement: LanShareAnnouncement = serde_json::from_slice(payload).ok()?;
+    if announcement.instance_id == own_instance_id
+        || announcement.instance_id.len() != 32
+        || !announcement
+            .instance_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || announcement.token.len() != 32
+        || !announcement
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || announcement.port == 0
+        || announcement.device_name.trim().is_empty()
+        || announcement.device_name.len() > 128
+        || announcement.folder_name.trim().is_empty()
+        || announcement.folder_name.len() > 255
+        || !matches!(announcement.permission.as_str(), "readOnly" | "manage")
+        || !is_local_network_address(peer.ip())
+    {
+        return None;
+    }
+    let IpAddr::V4(peer_address) = peer.ip() else {
+        return None;
+    };
+
+    Some(DiscoveredLanShare {
+        id: announcement.instance_id,
+        device_name: announcement.device_name,
+        folder_name: announcement.folder_name,
+        permission: announcement.permission,
+        url: format!(
+            "http://{}:{}/share/{}",
+            peer_address, announcement.port, announcement.token
+        ),
+    })
+}
+
+pub fn discovered_shares(state: &AppState) -> Vec<DiscoveredLanShare> {
+    let mut shares: Vec<_> = state
+        .discovered_lan_shares
+        .lock()
+        .values()
+        .map(|(share, _)| share.clone())
+        .collect();
+    shares.sort_by(|left, right| {
+        left.device_name
+            .to_lowercase()
+            .cmp(&right.device_name.to_lowercase())
+            .then_with(|| {
+                left.folder_name
+                    .to_lowercase()
+                    .cmp(&right.folder_name.to_lowercase())
+            })
+    });
+    shares
+}
+
+pub fn open_discovered_share(state: &AppState, share_id: &str) -> LibrResult<()> {
+    let share = state
+        .discovered_lan_shares
+        .lock()
+        .get(share_id)
+        .map(|(share, _)| share.clone())
+        .ok_or_else(|| LibrError::Other("该局域网分享已离线".into()))?;
+    opener::open(share.url).map_err(|error| LibrError::Other(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn device_name() -> String {
+    use std::ffi::CStr;
+
+    let mut buffer = [0_i8; 256];
+    if unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) } == 0 {
+        buffer[255] = 0;
+        let hostname = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .trim_end_matches(".local")
+            .to_owned();
+        if !hostname.is_empty() {
+            return hostname;
+        }
+    }
+    "Libr 用户".into()
+}
+
+#[cfg(not(unix))]
+fn device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Libr 用户".into())
 }
 
 fn serve(listener: TcpListener, app: AppHandle, state: AppState, config: ShareConfig) {
@@ -711,5 +1064,90 @@ mod tests {
         assert!(is_local_network_address("100.64.1.2".parse().unwrap()));
         assert!(is_local_network_address("127.0.0.1".parse().unwrap()));
         assert!(!is_local_network_address("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn prefers_physical_private_address_over_virtual_and_benchmark_addresses() {
+        let candidates = vec![
+            Ipv4Interface {
+                name: "utun6".to_owned(),
+                address: "198.18.0.1".parse().unwrap(),
+                netmask: "255.255.255.252".parse().unwrap(),
+            },
+            Ipv4Interface {
+                name: "bridge100".to_owned(),
+                address: "172.16.0.1".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+            },
+            Ipv4Interface {
+                name: "en1".to_owned(),
+                address: "192.168.2.22".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+            },
+        ];
+        let selected = candidates
+            .into_iter()
+            .filter(|interface| is_usable_interface_address(interface.address))
+            .max_by_key(|interface| local_ipv4_score(&interface.name, interface.address));
+
+        assert_eq!(
+            selected.unwrap().address,
+            "192.168.2.22".parse::<Ipv4Addr>().unwrap()
+        );
+        assert!(is_benchmark_address("198.18.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn builds_discovered_share_url_from_the_packet_source() {
+        let announcement = LanShareAnnouncement {
+            instance_id: "a".repeat(32),
+            device_name: "小王的 MacBook".into(),
+            folder_name: "团队素材".into(),
+            permission: "readOnly".into(),
+            port: 41783,
+            token: "b".repeat(32),
+        };
+        let mut packet = DISCOVERY_MAGIC.to_vec();
+        packet.extend(serde_json::to_vec(&announcement).unwrap());
+
+        let share = parse_discovery_packet(
+            &packet,
+            "192.168.2.35:51244".parse().unwrap(),
+            &"c".repeat(32),
+        )
+        .unwrap();
+
+        assert_eq!(share.device_name, "小王的 MacBook");
+        assert_eq!(share.folder_name, "团队素材");
+        assert_eq!(
+            share.url,
+            format!("http://192.168.2.35:41783/share/{}", "b".repeat(32))
+        );
+    }
+
+    #[test]
+    fn ignores_own_and_non_lan_discovery_packets() {
+        let own_id = "a".repeat(32);
+        let announcement = LanShareAnnouncement {
+            instance_id: own_id.clone(),
+            device_name: "My Mac".into(),
+            folder_name: "Assets".into(),
+            permission: "manage".into(),
+            port: 41783,
+            token: "b".repeat(32),
+        };
+        let mut packet = DISCOVERY_MAGIC.to_vec();
+        packet.extend(serde_json::to_vec(&announcement).unwrap());
+
+        assert!(
+            parse_discovery_packet(&packet, "192.168.2.22:51244".parse().unwrap(), &own_id,)
+                .is_none()
+        );
+        assert!(parse_discovery_packet(
+            &packet,
+            "198.18.0.1:51244".parse().unwrap(),
+            &"c".repeat(32),
+        )
+        .is_none());
     }
 }

@@ -69,8 +69,8 @@ describe("Libr desktop shell", () => {
   it("provides feedback for the import action in browser preview", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(screen.getByRole("button", { name: "导入文件" }));
-    expect(await screen.findByText(/导入入口工作正常/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "映射导入文件" }));
+    expect(await screen.findByText(/映射导入入口工作正常/)).toBeInTheDocument();
   });
 
   it("offers recursive folder import from the import menu", async () => {
@@ -105,6 +105,19 @@ describe("Libr desktop shell", () => {
     expect(await within(dialog).findByText("正在共享")).toBeInTheDocument();
     expect((within(dialog).getByLabelText("局域网共享链接") as HTMLInputElement).value).toMatch(/^http:\/\/192\.168\.1\.23:/);
     expect(within(dialog).getByText("访问者可下载、重命名、收藏和移到回收站")).toBeInTheDocument();
+  });
+
+  it("shows and opens shares discovered on the local network", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const section = screen.getByRole("region", { name: "局域网分享" });
+    expect(within(section).getByText("团队素材")).toBeInTheDocument();
+    expect(within(section).getByText("小王的 MacBook · 仅查看")).toBeInTheDocument();
+    expect(within(section).getByLabelText("发现 1 个局域网分享")).toBeInTheDocument();
+
+    await user.click(within(section).getByRole("button", { name: "打开 小王的 MacBook 分享的 团队素材" }));
+    expect(await screen.findByText("桌面版会在浏览器中打开“团队素材”")).toBeInTheDocument();
   });
 
   it("dismisses dropdown menus and pickers when clicking elsewhere", async () => {
@@ -306,7 +319,7 @@ describe("Libr desktop shell", () => {
     }
   });
 
-  it("shows a real video frame surface and keeps audio controls stateful", async () => {
+  it("defers video and audio loading until the user asks for playback", async () => {
     const user = userEvent.setup();
     const video = mockAssets.find((asset) => asset.id === "asset-city")!;
     const audio = mockAssets.find((asset) => asset.id === "asset-audio")!;
@@ -321,7 +334,17 @@ describe("Libr desktop shell", () => {
 
     try {
       render(<App />);
-      expect(screen.getByLabelText("城市延时.mp4 视频缩略图")).toBeInstanceOf(HTMLVideoElement);
+      const videoThumbnail = screen.getByLabelText("城市延时.mp4 视频缩略图");
+      expect(videoThumbnail).not.toBeInstanceOf(HTMLVideoElement);
+      expect(document.querySelector(".asset-grid video")).toBeNull();
+      expect(document.querySelector(".asset-grid audio")).toHaveAttribute("preload", "none");
+
+      const videoCard = screen.getByText("城市延时.mp4").closest(".asset-card")!;
+      await user.dblClick(videoCard);
+      const videoDialog = screen.getByRole("dialog", { name: "预览 城市延时.mp4" });
+      expect(videoDialog.querySelector("video[controls]")).not.toBeNull();
+      await user.click(within(videoDialog).getByRole("button", { name: "关闭预览" }));
+
       await user.click(screen.getByRole("button", { name: "播放 背景音乐.mp3" }));
       expect(await screen.findByRole("button", { name: "暂停 背景音乐.mp3" })).toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "暂停 背景音乐.mp3" }));

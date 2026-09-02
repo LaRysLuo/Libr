@@ -6,6 +6,7 @@ import {
   Grid2X2,
   Import,
   LayoutGrid,
+  Link2,
   List,
   Menu,
   Search,
@@ -15,7 +16,7 @@ import {
 } from "lucide-react";
 import { useRef, useState, type ChangeEvent, type RefObject } from "react";
 import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
-import type { LibraryInfo, SearchQuery } from "../types";
+import type { ImportMode, LibraryInfo, SearchQuery } from "../types";
 import { IconButton } from "./IconButton";
 
 interface AppHeaderProps {
@@ -23,7 +24,8 @@ interface AppHeaderProps {
   searchText: string;
   sortBy: SearchQuery["sortBy"];
   viewMode: "grid" | "list";
-  deleteOriginals: boolean;
+  importMode: ImportMode;
+  importDisabled?: boolean;
   onSearch: (value: string) => void;
   onImportFiles: () => void;
   onImportFolder: () => void;
@@ -45,7 +47,8 @@ export function AppHeader({
   searchText,
   sortBy,
   viewMode,
-  deleteOriginals,
+  importMode,
+  importDisabled = false,
   onSearch,
   onImportFiles,
   onImportFolder,
@@ -108,9 +111,9 @@ export function AppHeader({
 
       <div className="header-actions">
         <div className="import-control" ref={importControlRef}>
-          <button type="button" className="primary-button import-button" aria-label={deleteOriginals ? "剪切导入文件" : "导入文件"} onClick={() => chooseImport(onImportFiles)}>
-            {deleteOriginals ? <Scissors size={16} /> : <Import size={16} />}
-            <span>{deleteOriginals ? "剪切导入" : "导入"}</span>
+          <button type="button" className="primary-button import-button" aria-label={importMode === "move" ? "剪切导入文件" : importMode === "map" ? "映射导入文件" : "导入文件"} disabled={importDisabled} onClick={() => chooseImport(onImportFiles)}>
+            {importMode === "move" ? <Scissors size={16} /> : importMode === "map" ? <Link2 size={16} /> : <Import size={16} />}
+            <span>{importMode === "move" ? "剪切导入" : importMode === "map" ? "映射导入" : "导入"}</span>
           </button>
           <button
             type="button"
@@ -124,18 +127,18 @@ export function AppHeader({
           </button>
           {importMenuOpen ? (
             <div className="library-menu import-menu" role="menu" aria-label="导入选项">
-              <button type="button" role="menuitem" onClick={() => chooseImport(onImportFiles)}>
+              <button type="button" role="menuitem" disabled={importDisabled} onClick={() => chooseImport(onImportFiles)}>
                 <FilePlus2 size={16} />
                 <span>导入文件…</span>
               </button>
-              <button type="button" role="menuitem" onClick={() => chooseImport(onImportFolder)}>
+              <button type="button" role="menuitem" disabled={importDisabled} onClick={() => chooseImport(onImportFolder)}>
                 <FolderOpen size={16} />
                 <span className="import-menu-copy"><strong>导入文件夹…</strong><small>包含所有子文件夹中的文件</small></span>
               </button>
               <div className="menu-divider" role="separator" />
               <button type="button" role="menuitem" onClick={() => chooseImport(onImportSettings)}>
                 <Settings2 size={16} />
-                <span className="import-menu-copy"><strong>导入配置…</strong><small>{deleteOriginals ? "当前：导入后删除原文件" : "当前：保留原文件"}</small></span>
+                <span className="import-menu-copy"><strong>导入配置…</strong><small>{importMode === "map" ? "当前：映射原文件（省空间）" : importMode === "move" ? "当前：导入后删除原文件" : "当前：复制到资源库"}</small></span>
               </button>
             </div>
           ) : null}

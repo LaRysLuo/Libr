@@ -72,7 +72,7 @@ function AudioPreviewControl({ asset }: { asset: Asset }) {
       <audio
         ref={audioRef}
         src={asset.assetUrl}
-        preload="metadata"
+        preload="none"
         aria-label={`${asset.displayName} 音频`}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}

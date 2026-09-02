@@ -15,9 +15,10 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { useDismissibleLayer } from "./hooks/useDismissibleLayer";
 import { useLibraryController } from "./hooks/useLibraryController";
+import { useLanShareDiscovery } from "./hooks/useLanShareDiscovery";
 import { shouldIgnoreNativeAssetDrop } from "./lib/drag";
 import { assetApi, isTauriRuntime, lanShareApi, libraryApi } from "./lib/tauri";
-import type { Asset, Folder, LanShareInfo } from "./types";
+import type { Asset, DiscoveredLanShare, Folder, ImportMode, LanShareInfo } from "./types";
 
 interface ToastState {
   kind: "success" | "error" | "info";
@@ -44,10 +45,12 @@ function getInitialTheme(): Theme {
 
 function getInitialImportSettings(): ImportSettings {
   try {
-    const stored = JSON.parse(window.localStorage.getItem(IMPORT_SETTINGS_STORAGE_KEY) ?? "null") as Partial<ImportSettings> | null;
-    return { deleteOriginals: stored?.deleteOriginals === true };
+    const stored = JSON.parse(window.localStorage.getItem(IMPORT_SETTINGS_STORAGE_KEY) ?? "null") as ({ mode?: ImportMode; deleteOriginals?: boolean }) | null;
+    if (stored?.mode === "map" || stored?.mode === "copy" || stored?.mode === "move") return { mode: stored.mode };
+    if (stored?.deleteOriginals === true) return { mode: "move" };
+    return { mode: "map" };
   } catch {
-    return { deleteOriginals: false };
+    return { mode: "map" };
   }
 }
 
@@ -63,6 +66,7 @@ async function chooseLibraryToCreate() {
 
 function App() {
   const controller = useLibraryController();
+  const { shares: discoveredLanShares } = useLanShareDiscovery();
   const updater = useAppUpdater(controller.activeJobs, controller.library?.path);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [inspectorVisible, setInspectorVisible] = useState(true);
@@ -119,14 +123,14 @@ function App() {
           const paths = event.payload.paths.filter(Boolean);
           if (paths.length === 0) return;
           if (shouldIgnoreNativeAssetDrop(paths)) return;
-          void controller.importPaths(paths).then((result) => {
-            setToast({ kind: "success", message: `已导入 ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项` });
+          void controller.importPaths(paths, undefined, importSettings.mode).then((result) => {
+            setToast({ kind: "success", message: `${importSettings.mode === "map" ? "已映射" : "已导入"} ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项` });
           }).catch((reason) => setToast({ kind: "error", message: String(reason) }));
         }
       }).then((dispose) => { unlisten = dispose; });
     });
     return () => unlisten?.();
-  }, [controller.importPaths, controller.library]);
+  }, [controller.importPaths, controller.library, importSettings.mode]);
 
   const createLibrary = async () => {
     if (!isTauriRuntime()) {
@@ -147,12 +151,16 @@ function App() {
   };
 
   const importAssets = async (source: "files" | "folder") => {
-    const { deleteOriginals } = importSettings;
+    const { mode } = importSettings;
     if (!isTauriRuntime()) {
       setToast({
         kind: "success",
-        message: deleteOriginals
+        message: mode === "move"
           ? "剪切导入入口工作正常；桌面版只会删除新导入成功的原文件，重复项会保留。"
+          : mode === "map"
+          ? source === "folder"
+            ? "文件夹映射导入入口工作正常；桌面版会映射所选文件夹及其所有子文件夹中的文件，不会复制文件内容。"
+            : "映射导入入口工作正常；桌面版只保存原文件路径和缩略图，不会复制文件内容。"
           : source === "folder"
           ? "文件夹导入入口工作正常；桌面版会导入所选文件夹及其所有子文件夹中的文件。"
           : "导入入口工作正常；桌面版会流式写入当前资源库。",
@@ -163,13 +171,17 @@ function App() {
     const paths = await open({ multiple: source === "files", directory: source === "folder" });
     if (!paths) return;
     const list = typeof paths === "string" ? [paths] : paths;
-    const result = await controller.importPaths(list, undefined, deleteOriginals);
-    if (deleteOriginals) {
+    const result = await controller.importPaths(list, undefined, mode);
+    if (mode === "move") {
       const deleteFailures = result.sourceDeleteFailures.length;
       setToast({
         kind: deleteFailures ? "info" : "success",
         message: `已剪切导入 ${result.imported.length} 项，删除 ${result.deletedOriginals} 个原文件${result.duplicates ? `，保留 ${result.duplicates} 个重复项` : ""}${deleteFailures ? `，${deleteFailures} 个原文件无法删除` : ""}`,
       });
+      return;
+    }
+    if (mode === "map") {
+      setToast({ kind: "success", message: `已映射 ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项；原文件内容未复制` });
       return;
     }
     setToast({ kind: "success", message: `已导入 ${result.imported.length} 项，跳过 ${result.duplicates} 个重复项` });
@@ -179,7 +191,7 @@ function App() {
     setImportSettings(settings);
     window.localStorage.setItem(IMPORT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
     setImportSettingsOpen(false);
-    setToast({ kind: "success", message: settings.deleteOriginals ? "导入已设为剪切模式" : "导入已设为复制模式" });
+    setToast({ kind: "success", message: settings.mode === "map" ? "导入已设为映射模式" : settings.mode === "move" ? "导入已设为剪切模式" : "导入已设为复制模式" });
   }, []);
 
   const saveCopy = async () => {
@@ -229,9 +241,18 @@ function App() {
     setToast({ kind: "success", message: "局域网共享已停止" });
   };
 
+  const openDiscoveredLanShare = useCallback((share: DiscoveredLanShare) => {
+    if (!isTauriRuntime()) {
+      setToast({ kind: "info", message: `桌面版会在浏览器中打开“${share.folderName}”` });
+      return;
+    }
+    void lanShareApi.open(share.id)
+      .catch((reason) => setToast({ kind: "error", message: String(reason) }));
+  }, []);
+
   const openExternal = async (asset: Asset) => {
     if (!isTauriRuntime()) {
-      setToast({ kind: "info", message: `桌面版会只读打开“${asset.displayName}”` });
+      setToast({ kind: "info", message: `桌面版会在外部应用中打开“${asset.displayName}”` });
       return;
     }
     await assetApi.openExternal(asset.id);
@@ -368,7 +389,8 @@ function App() {
         searchText={controller.searchText}
         sortBy={controller.sortBy}
         viewMode={viewMode}
-        deleteOriginals={importSettings.deleteOriginals}
+        importMode={importSettings.mode}
+        importDisabled={controller.activeJobs > 0}
         onSearch={controller.setSearchText}
         onImportFiles={() => void importAssets("files")}
         onImportFolder={() => void importAssets("folder")}
@@ -425,6 +447,8 @@ function App() {
             onFolderSecurity={handleFolderSecurity}
             onShareFolder={openLanShare}
             sharedFolderId={lanShareInfo.active ? lanShareInfo.folderId : null}
+            discoveredLanShares={discoveredLanShares}
+            onOpenLanShare={openDiscoveredLanShare}
             onCreateFolder={controller.createFolder}
             onCreateSmartFolder={controller.createSmartFolder}
             onAssignAssets={assignAssetsToFolder}

@@ -1996,11 +1996,12 @@ dependencies = [
 
 [[package]]
 name = "libr"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "hex",
  "image",
+ "libc",
  "mime_guess",
  "opener",
  "parking_lot",

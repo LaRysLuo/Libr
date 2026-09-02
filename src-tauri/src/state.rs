@@ -8,20 +8,41 @@ use std::{
 
 use parking_lot::Mutex;
 
-use crate::{db::LibrarySession, models::LanShareInfo};
+use std::time::Instant;
+
+use crate::{
+    db::LibrarySession,
+    models::{DiscoveredLanShare, LanShareInfo},
+};
 
 pub struct LanShareRuntime {
     pub stop: Arc<AtomicBool>,
     pub info: LanShareInfo,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppState {
     pub session: Arc<Mutex<Option<LibrarySession>>>,
     pub cancelled_jobs: Arc<Mutex<HashSet<String>>>,
     pub stream_tokens: Arc<Mutex<StreamTokenStore>>,
     pub unlocked_folders: Arc<Mutex<HashSet<String>>>,
     pub lan_share: Arc<Mutex<Option<LanShareRuntime>>>,
+    pub lan_share_instance_id: String,
+    pub discovered_lan_shares: Arc<Mutex<HashMap<String, (DiscoveredLanShare, Instant)>>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            session: Arc::default(),
+            cancelled_jobs: Arc::default(),
+            stream_tokens: Arc::default(),
+            unlocked_folders: Arc::default(),
+            lan_share: Arc::default(),
+            lan_share_instance_id: uuid::Uuid::new_v4().simple().to_string(),
+            discovered_lan_shares: Arc::default(),
+        }
+    }
 }
 
 impl AppState {

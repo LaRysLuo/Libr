@@ -198,6 +198,16 @@ pub struct LanShareInfo {
     pub port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredLanShare {
+    pub id: String,
+    pub device_name: String,
+    pub folder_name: String,
+    pub permission: String,
+    pub url: String,
+}
+
 impl Default for LanShareInfo {
     fn default() -> Self {
         Self {

@@ -154,7 +154,7 @@ pub fn parse_range(value: &str, total: u64) -> Option<(u64, u64, bool)> {
     let spec = value.strip_prefix("bytes=")?.split(',').next()?.trim();
     let (start, end) = spec.split_once('-')?;
     if start.is_empty() {
-        let suffix = end.parse::<u64>().ok()?.min(total);
+        let suffix = end.parse::<u64>().ok()?.min(total).min(MAX_RANGE_BYTES);
         return Some((total.saturating_sub(suffix), total.saturating_sub(1), true));
     }
     let start = start.parse::<u64>().ok()?;
@@ -178,5 +178,9 @@ mod tests {
         assert_eq!(parse_range("bytes=10-19", 100), Some((10, 19, true)));
         assert_eq!(parse_range("bytes=-10", 100), Some((90, 99, true)));
         assert_eq!(parse_range("bytes=90-", 100), Some((90, 99, true)));
+        assert_eq!(
+            parse_range("bytes=-99999999", 10 * 1024 * 1024),
+            Some((6 * 1024 * 1024, 10 * 1024 * 1024 - 1, true))
+        );
     }
 }
