@@ -23,6 +23,7 @@ use crate::{
 pub const SCHEMA_VERSION: i64 = 3;
 pub const APPLICATION_ID: i64 = 0x4C49_4252;
 const EMBEDDED_COVER_SCAN_KIND: &str = "embedded-cover-v1";
+const HEIF_PREVIEW_SCAN_KIND: &str = "heif-preview-v1";
 const MAX_EMBEDDED_COVER_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct LibrarySession {
@@ -660,6 +661,70 @@ fn backfill_embedded_video_previews(session: &LibrarySession) -> LibrResult<()> 
     Ok(())
 }
 
+pub fn backfill_heif_previews(session: &LibrarySession) -> LibrResult<usize> {
+    if session.read_only || schema_version(&session.conn)? < 3 {
+        return Ok(0);
+    }
+    let candidates = {
+        let mut statement = session.conn.prepare(
+            "SELECT a.id, b.rowid, b.external_path
+             FROM assets a JOIN blobs b ON b.id = a.blob_id
+             WHERE UPPER(a.extension) IN ('HEIC', 'HEIF', 'HIF')
+               AND NOT EXISTS (
+                   SELECT 1 FROM previews p
+                   WHERE p.asset_id = a.id AND p.kind = ?1
+               )",
+        )?;
+        let rows = statement
+            .query_map([HEIF_PREVIEW_SCAN_KIND], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut generated = 0;
+    for (asset_id, blob_rowid, external_path) in candidates {
+        let bytes = if let Some(external_path) = external_path {
+            match fs::read(external_path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            }
+        } else {
+            let mut blob = session
+                .conn
+                .blob_open("main", "blobs", "data", blob_rowid, true)?;
+            let mut bytes = Vec::with_capacity(blob.len());
+            blob.read_to_end(&mut bytes)?;
+            bytes
+        };
+        if let Ok((data, width, height, dominant_color)) = generate_heif_preview(&bytes) {
+            session.conn.execute(
+                "INSERT OR REPLACE INTO previews(asset_id, kind, width, height, mime, data)
+                 VALUES (?1, 'thumbnail', ?2, ?3, 'image/jpeg', ?4)",
+                params![asset_id, width, height, data],
+            )?;
+            session.conn.execute(
+                "UPDATE assets SET width = ?1, height = ?2, dominant_color = ?3 WHERE id = ?4",
+                params![width, height, dominant_color, asset_id],
+            )?;
+            generated += 1;
+        }
+        session.conn.execute(
+            "INSERT OR REPLACE INTO previews(asset_id, kind, width, height, mime, data)
+             VALUES (?1, ?2, NULL, NULL, 'application/x-libr-marker', x'')",
+            params![asset_id, HEIF_PREVIEW_SCAN_KIND],
+        )?;
+    }
+    if generated > 0 {
+        touch_library(&session.conn)?;
+    }
+    Ok(generated)
+}
+
 pub fn import_file(
     session: &mut LibrarySession,
     path: &Path,
@@ -787,6 +852,13 @@ fn import_file_with_storage(
             "INSERT INTO previews(asset_id, kind, width, height, mime, data)
              VALUES (?1, ?2, NULL, NULL, 'application/x-libr-marker', x'')",
             params![asset_id, EMBEDDED_COVER_SCAN_KIND],
+        )?;
+    }
+    if is_heif_extension(&extension) {
+        transaction.execute(
+            "INSERT INTO previews(asset_id, kind, width, height, mime, data)
+             VALUES (?1, ?2, NULL, NULL, 'application/x-libr-marker', x'')",
+            params![asset_id, HEIF_PREVIEW_SCAN_KIND],
         )?;
     }
     transaction.execute(
@@ -1544,7 +1616,29 @@ fn schema_version(conn: &Connection) -> LibrResult<i64> {
 }
 
 fn generate_image_preview(path: &Path) -> LibrResult<(Vec<u8>, u32, u32, String)> {
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(is_heif_extension)
+    {
+        return generate_heif_preview(&fs::read(path)?);
+    }
     generate_preview(image::open(path)?)
+}
+
+fn generate_heif_preview(data: &[u8]) -> LibrResult<(Vec<u8>, u32, u32, String)> {
+    let decoded = heif_oxide::decode_bytes(data)
+        .map_err(|error| LibrError::Other(format!("无法解码 HEIC/HEIF：{error}")))?;
+    let image = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.to_rgba8())
+        .ok_or_else(|| LibrError::Other("HEIC/HEIF 像素数据尺寸无效".into()))?;
+    generate_preview(image::DynamicImage::ImageRgba8(image))
+}
+
+fn is_heif_extension(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_uppercase().as_str(),
+        "HEIC" | "HEIF" | "HIF"
+    )
 }
 
 fn generate_preview(image: image::DynamicImage) -> LibrResult<(Vec<u8>, u32, u32, String)> {
@@ -1681,7 +1775,7 @@ fn generate_embedded_video_preview(
 fn classify_asset(extension: &str, mime: &str) -> AssetKind {
     match extension {
         "JPG" | "JPEG" | "PNG" | "GIF" | "WEBP" | "BMP" | "TIFF" | "TIF" | "SVG" | "ICO"
-        | "HEIC" | "HEIF" => AssetKind::Image,
+        | "HEIC" | "HEIF" | "HIF" => AssetKind::Image,
         "MP4" | "MOV" | "M4V" | "WEBM" => AssetKind::Video,
         "MP3" | "WAV" | "M4A" | "AAC" | "FLAC" | "OGG" => AssetKind::Audio,
         "PDF" => AssetKind::Pdf,
@@ -2016,6 +2110,17 @@ mod tests {
     #[test]
     fn filename_sanitization_is_cross_platform_safe() {
         assert_eq!(sanitize_filename("a:b/c?.png"), "a_b_c_.png");
+    }
+
+    #[test]
+    fn recognizes_common_heif_extensions_as_images() {
+        for extension in ["HEIC", "heif", "Hif"] {
+            assert!(is_heif_extension(extension));
+            assert_eq!(
+                classify_asset(&extension.to_ascii_uppercase(), "application/octet-stream"),
+                AssetKind::Image
+            );
+        }
     }
 
     #[test]

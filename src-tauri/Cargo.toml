@@ -1,6 +1,6 @@
 [package]
 name = "libr"
-version = "0.1.6"
+version = "0.1.7"
 description = "A portable cross-platform asset library"
 authors = ["Libr Contributors"]
 edition = "2021"
@@ -32,6 +32,7 @@ parking_lot = "0.12"
 thiserror = "2"
 libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
+heif-oxide = "0.1"
 opener = "0.8"
 tauri-plugin-drag = "2.1.1"
 

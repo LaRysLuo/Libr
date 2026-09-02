@@ -257,6 +257,7 @@ pub fn lan_share_open(state: State<'_, AppState>, share_id: String) -> LibrResul
 pub fn asset_list(state: State<'_, AppState>, query: SearchQuery) -> LibrResult<Vec<Asset>> {
     let guard = state.session.lock();
     let session = guard.as_ref().ok_or(LibrError::NoLibrary)?;
+    db::backfill_heif_previews(session)?;
     let blocked = blocked_folder_ids(state.inner(), session)?;
     if let Some(folder_id) = &query.folder_id {
         ensure_folder_accessible(&blocked, folder_id)?;
