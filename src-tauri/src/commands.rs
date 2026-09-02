@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
 };
 
@@ -24,6 +25,17 @@ use crate::{
 pub struct PreparedAssetDrag {
     paths: Vec<String>,
     icon_path: String,
+}
+
+const DRAG_PREVIEW_MAX_EDGE: u32 = 96;
+
+fn compact_drag_preview(source: &[u8]) -> LibrResult<Vec<u8>> {
+    let thumbnail = image::load_from_memory(source)?
+        .thumbnail(DRAG_PREVIEW_MAX_EDGE, DRAG_PREVIEW_MAX_EDGE)
+        .to_rgba8();
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(thumbnail).write_to(&mut encoded, image::ImageFormat::Png)?;
+    Ok(encoded.into_inner())
 }
 
 fn remember_library(app: &AppHandle, path: &Path) {
@@ -555,20 +567,23 @@ pub async fn asset_prepare_drag(
         let first_asset_id = asset_ids
             .first()
             .ok_or_else(|| LibrError::Other("资源不存在".into()))?;
-        let preview_path = library_cache.join(format!("{first_asset_id}-drag-preview.jpg"));
+        // The regular library thumbnail can be as large as 720 px. Native drag APIs render the
+        // icon at its intrinsic size, so passing that thumbnail through makes it cover the app.
+        // Keep a separately versioned, compact icon; the version also prevents stale large icons
+        // from older releases from remaining in the cache.
+        let preview_path = library_cache.join(format!("{first_asset_id}-drag-preview-v2.png"));
         let icon_path = if preview_path.exists() {
             preview_path
         } else {
-            let mut preview = fs::File::create(&preview_path)?;
-            if db::stream_asset_preview_to_writer(session, first_asset_id, &mut preview)? {
+            let mut source_preview = Vec::new();
+            if db::stream_asset_preview_to_writer(session, first_asset_id, &mut source_preview)? {
+                fs::write(&preview_path, compact_drag_preview(&source_preview)?)?;
                 preview_path
             } else {
-                drop(preview);
                 let fallback = library_cache.join("libr-drag-icon.png");
                 if !fallback.exists() {
                     fs::write(&fallback, include_bytes!("../icons/128x128.png"))?;
                 }
-                let _ = fs::remove_file(&preview_path);
                 fallback
             }
         };
@@ -799,8 +814,13 @@ pub fn smart_folder_delete(state: State<'_, AppState>, id: String) -> LibrResult
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_files, delete_import_source, safe_drag_filename};
+    use super::{
+        collect_files, compact_drag_preview, delete_import_source, safe_drag_filename,
+        DRAG_PREVIEW_MAX_EDGE,
+    };
+    use image::GenericImageView;
     use std::fs;
+    use std::io::Cursor;
 
     #[test]
     fn collects_every_file_from_nested_import_folders() {
@@ -857,5 +877,19 @@ mod tests {
         assert_eq!(safe_drag_filename("design:final.psd"), "design_final.psd");
         assert_eq!(safe_drag_filename(".."), "未命名文件");
         assert_eq!(safe_drag_filename("   "), "未命名文件");
+    }
+
+    #[test]
+    fn native_drag_preview_is_compact_and_keeps_its_aspect_ratio() {
+        let source = image::DynamicImage::ImageRgb8(image::RgbImage::new(720, 540));
+        let mut source_bytes = Cursor::new(Vec::new());
+        source
+            .write_to(&mut source_bytes, image::ImageFormat::Jpeg)
+            .unwrap();
+
+        let compact = compact_drag_preview(&source_bytes.into_inner()).unwrap();
+        let decoded = image::load_from_memory(&compact).unwrap();
+
+        assert_eq!(decoded.dimensions(), (DRAG_PREVIEW_MAX_EDGE, 72));
     }
 }
