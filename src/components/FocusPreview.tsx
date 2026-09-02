@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Info, Maximize2, RotateCw, Star, X, ZoomIn, ZoomOut } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type WheelEvent } from "react";
 import type { Asset } from "../types";
 import { AssetArtwork } from "./AssetArtwork";
 import { IconButton } from "./IconButton";
@@ -11,6 +11,13 @@ interface FocusPreviewProps {
   onNavigate: (asset: Asset) => void;
   onFavorite: (asset: Asset) => void;
 }
+
+const MIN_ZOOM = 25;
+const MAX_ZOOM = 400;
+const TOOLBAR_ZOOM_STEP = 25;
+const TRACKPAD_ZOOM_STEP = 5;
+
+const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 
 function FocusMedia({ asset }: { asset: Asset }) {
   if (asset.kind === "video" && asset.assetUrl) {
@@ -30,6 +37,7 @@ export function FocusPreview({ asset, assets, onClose, onNavigate, onFavorite }:
   const [rotation, setRotation] = useState(0);
   const [infoVisible, setInfoVisible] = useState(false);
   const currentIndex = assets.findIndex((item) => item.id === asset.id);
+  const isImage = asset.kind === "image";
   const navigate = (direction: -1 | 1) => {
     const nextIndex = Math.min(assets.length - 1, Math.max(0, currentIndex + direction));
     const next = assets[nextIndex];
@@ -46,6 +54,13 @@ export function FocusPreview({ asset, assets, onClose, onNavigate, onFavorite }:
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
+  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+    if (!isImage || event.deltaY === 0) return;
+    event.preventDefault();
+    const step = Math.abs(event.deltaY) >= 50 ? TOOLBAR_ZOOM_STEP : TRACKPAD_ZOOM_STEP;
+    setZoom((value) => clampZoom(value + (event.deltaY < 0 ? step : -step)));
+  }, [isImage]);
+
   return (
     <div className="focus-preview" role="dialog" aria-modal="true" aria-label={`预览 ${asset.displayName}`}>
       <header className="focus-toolbar">
@@ -59,16 +74,16 @@ export function FocusPreview({ asset, assets, onClose, onNavigate, onFavorite }:
           <IconButton label="下一项" disabled={currentIndex >= assets.length - 1} onClick={() => navigate(1)}><ChevronRight size={18} /></IconButton>
         </div>
         <div className="focus-group">
-          <IconButton label="缩小" onClick={() => setZoom((value) => Math.max(25, value - 25))}><ZoomOut size={17} /></IconButton>
+          <IconButton label="缩小" onClick={() => setZoom((value) => clampZoom(value - TOOLBAR_ZOOM_STEP))}><ZoomOut size={17} /></IconButton>
           <span className="zoom-value">{zoom}%</span>
-          <IconButton label="放大" onClick={() => setZoom((value) => Math.min(400, value + 25))}><ZoomIn size={17} /></IconButton>
+          <IconButton label="放大" onClick={() => setZoom((value) => clampZoom(value + TOOLBAR_ZOOM_STEP))}><ZoomIn size={17} /></IconButton>
           <IconButton label="适合窗口" onClick={() => setZoom(100)}><Maximize2 size={17} /></IconButton>
           <IconButton label="顺时针旋转" onClick={() => setRotation((value) => (value + 90) % 360)}><RotateCw size={17} /></IconButton>
           <IconButton label={asset.favorite ? "取消收藏" : "收藏"} selected={asset.favorite} onClick={() => onFavorite(asset)}><Star size={17} fill={asset.favorite ? "currentColor" : "none"} /></IconButton>
           <IconButton label="显示信息" selected={infoVisible} onClick={() => setInfoVisible((value) => !value)}><Info size={17} /></IconButton>
         </div>
       </header>
-      <div className="focus-canvas">
+      <div className={`focus-canvas ${isImage ? "is-zoomable" : ""}`} role="region" aria-label={isImage ? "图片预览画布，滚轮可缩放" : "预览画布"} onWheel={handleWheel}>
         <div className="focus-media" style={{ transform: `scale(${zoom / 100}) rotate(${rotation}deg)` }}><FocusMedia asset={asset} /></div>
         {infoVisible ? <div className="focus-info"><strong>{asset.displayName}</strong><span>{asset.extension} · {(asset.byteSize / 1_000_000).toFixed(1)} MB</span>{asset.width && asset.height ? <span>{asset.width} × {asset.height}</span> : null}<span>{asset.tags.map((tag) => tag.name).join(" · ") || "无标签"}</span></div> : null}
       </div>
