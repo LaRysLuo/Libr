@@ -1,6 +1,7 @@
 import { assetApi, isTauriRuntime } from "./tauri";
 
 export const ASSET_DRAG_TYPE = "application/x-libr-assets";
+export const NATIVE_ASSET_DRAG_TARGET_EVENT = "libr:native-asset-drag-target";
 
 let activeNativeDragPaths = new Set<string>();
 let clearNativeDragTimer: number | undefined;
@@ -78,4 +79,26 @@ export const folderIdAtScreenPosition = async (position: { x: number; y: number 
     .elementFromPoint(clientX, clientY)
     ?.closest<HTMLElement>("[data-folder-drop-target]")
     ?.dataset.folderDropTarget;
+};
+
+export const folderIdAtCurrentCursorPosition = async () => {
+  const { cursorPosition, getCurrentWindow } = await import("@tauri-apps/api/window");
+  const currentWindow = getCurrentWindow();
+  const [position, innerPosition, scaleFactor] = await Promise.all([
+    cursorPosition(),
+    currentWindow.innerPosition(),
+    currentWindow.scaleFactor(),
+  ]);
+  const clientX = (position.x - innerPosition.x) / scaleFactor;
+  const clientY = (position.y - innerPosition.y) / scaleFactor;
+  return document
+    .elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>("[data-folder-drop-target]")
+    ?.dataset.folderDropTarget;
+};
+
+export const announceNativeAssetDragTarget = (folderId?: string | null) => {
+  window.dispatchEvent(new CustomEvent<string | null>(NATIVE_ASSET_DRAG_TARGET_EVENT, {
+    detail: folderId ?? null,
+  }));
 };

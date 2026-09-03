@@ -3,6 +3,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Asset } from "../types";
 import {
   ASSET_DRAG_TYPE,
+  announceNativeAssetDragTarget,
+  folderIdAtCurrentCursorPosition,
   folderIdAtScreenPosition,
   prepareNativeAssetDrag,
   startNativeAssetDrag,
@@ -338,6 +340,37 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
   }, [selectedIds]);
 
   const beginNativeDrag = useCallback(async (state: PointerDragState) => {
+    let trackingDropTarget = true;
+    let checkingDropTarget = false;
+    let dropTargetTimer: number | undefined;
+    let announcedDropTarget: string | null = null;
+    const updateDropTarget = (folderId?: string | null) => {
+      const nextFolderId = folderId ?? null;
+      if (nextFolderId === announcedDropTarget) return;
+      announcedDropTarget = nextFolderId;
+      announceNativeAssetDragTarget(nextFolderId);
+    };
+    const refreshDropTarget = () => {
+      if (!trackingDropTarget || checkingDropTarget) return;
+      checkingDropTarget = true;
+      void folderIdAtCurrentCursorPosition()
+        .then((folderId) => {
+          if (trackingDropTarget) updateDropTarget(folderId);
+        })
+        .catch(() => {
+          if (trackingDropTarget) updateDropTarget(null);
+        })
+        .finally(() => {
+          checkingDropTarget = false;
+        });
+    };
+    const stopTrackingDropTarget = () => {
+      if (!trackingDropTarget) return;
+      trackingDropTarget = false;
+      if (dropTargetTimer !== undefined) window.clearInterval(dropTargetTimer);
+      updateDropTarget(null);
+    };
+
     try {
       state.source.classList.add("is-preparing-drag");
       const prepared = await state.preparation;
@@ -351,6 +384,8 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
       state.source.classList.remove("is-preparing-drag");
       state.source.classList.add("is-dragging");
       document.documentElement.classList.add("is-asset-dragging");
+      refreshDropTarget();
+      dropTargetTimer = window.setInterval(refreshDropTarget, 75);
 
       await startNativeAssetDrag(
         prepared,
@@ -360,11 +395,13 @@ export function AssetGrid({ assets, selectedIds, viewMode, thumbnailSize, loadin
           });
         },
         () => {
+          stopTrackingDropTarget();
           state.source.classList.remove("is-dragging", "is-preparing-drag");
           document.documentElement.classList.remove("is-asset-dragging");
         },
       );
     } catch (reason) {
+      stopTrackingDropTarget();
       state.source.classList.remove("is-dragging", "is-preparing-drag");
       document.documentElement.classList.remove("is-asset-dragging");
       if (pointerDragRef.current === state) cleanupPointerDrag(false);

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import App from "./App";
 import { mockAssets } from "./data/mockAssets";
+import { NATIVE_ASSET_DRAG_TARGET_EVENT } from "./lib/drag";
 
 describe("Libr desktop shell", () => {
   it("renders the complete library workspace", () => {
@@ -317,6 +318,24 @@ describe("Libr desktop shell", () => {
       if (originalElementFromPoint) Object.defineProperty(document, "elementFromPoint", { configurable: true, value: originalElementFromPoint });
       else Reflect.deleteProperty(document, "elementFromPoint");
     }
+  });
+
+  it("highlights only the folder currently targeted by a native drag", async () => {
+    render(<App />);
+    const documentRow = screen.getAllByText("文档").find((element) => element.classList.contains("sidebar-label"))!.closest("button")!;
+    const sourceRow = screen.getAllByText("素材源文件").find((element) => element.classList.contains("sidebar-label"))!.closest("button")!;
+
+    fireEvent(window, new CustomEvent(NATIVE_ASSET_DRAG_TARGET_EVENT, { detail: "folder-doc" }));
+
+    expect(documentRow).toHaveClass("is-drop-target");
+    expect(within(documentRow).getByText("松开添加")).toBeInTheDocument();
+    expect(sourceRow).not.toHaveClass("is-drop-target");
+    expect(within(sourceRow).queryByText("松开添加")).not.toBeInTheDocument();
+
+    fireEvent(window, new CustomEvent(NATIVE_ASSET_DRAG_TARGET_EVENT, { detail: null }));
+
+    await waitFor(() => expect(documentRow).not.toHaveClass("is-drop-target"));
+    expect(within(documentRow).queryByText("松开添加")).not.toBeInTheDocument();
   });
 
   it("defers video and audio loading until the user asks for playback", async () => {

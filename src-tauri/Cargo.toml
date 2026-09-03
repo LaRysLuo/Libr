@@ -1,6 +1,6 @@
 [package]
 name = "libr"
-version = "0.1.9"
+version = "0.1.10"
 description = "A portable cross-platform asset library"
 authors = ["Libr Contributors"]
 edition = "2021"

@@ -21,11 +21,11 @@ import {
   Tag,
   Trash2,
 } from "lucide-react";
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { DiscoveredLanShare, Folder, NavigationCounts, SmartFolder } from "../types";
 import type { NavigationScope } from "../hooks/useLibraryController";
 import { useDismissibleLayer } from "../hooks/useDismissibleLayer";
-import { hasDraggedAssets, readDraggedAssetIds } from "../lib/drag";
+import { hasDraggedAssets, NATIVE_ASSET_DRAG_TARGET_EVENT, readDraggedAssetIds } from "../lib/drag";
 
 interface SidebarProps {
   scope: NavigationScope;
@@ -100,6 +100,14 @@ export function Sidebar({ scope, folders, smartFolders, counts, onScope, onOpenF
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [folderMenu, setFolderMenu] = useState<{ folderId: string; x: number; y: number } | null>(null);
   const folderMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const updateNativeDropTarget = (event: Event) => {
+      setDropTargetId((event as CustomEvent<string | null>).detail);
+    };
+    window.addEventListener(NATIVE_ASSET_DRAG_TARGET_EVENT, updateNativeDropTarget);
+    return () => window.removeEventListener(NATIVE_ASSET_DRAG_TARGET_EVENT, updateNativeDropTarget);
+  }, []);
   const roots = useMemo(() => folders.filter((folder) => !folder.parentId), [folders]);
   const children = useMemo(() => {
     const map = new Map<string, Folder[]>();
